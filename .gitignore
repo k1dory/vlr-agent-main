@@ -1,0 +1,30 @@
+# binaries
+/vlr-main-agent
+/vlr-main-agent.exe
+/out/
+/dist/
+
+# persistent container data (bind mounts) — NEVER commit
+/data/
+
+# secrets / env
+.env
+.env.*
+!.env.example
+deploy/compose/.env
+
+# Go
+*.test
+*.out
+coverage.txt
+vendor/
+go.work
+go.work.sum
+
+# editor / OS
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+Thumbs.db

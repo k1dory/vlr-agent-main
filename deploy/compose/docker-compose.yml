@@ -1,0 +1,101 @@
+# vlr-main-agent control-plane stack.
+#
+# Data lives in BIND MOUNTS under ./data at the repo root (../../data here), so it
+# is in a path you control and SURVIVES `docker compose down` — only `down -v`
+# plus deleting ./data removes it. The agent container runs non-root (distroless
+# uid 65532). Run from this directory: `docker compose up -d --build`.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-vlr}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-vlr}
+      # Keep PGDATA in a subdir so the bind-mount root can hold lost+found etc.
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - ../../data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-vlr} -d ${POSTGRES_DB:-vlr}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    # Not published to the host by default — only the agent reaches it over the
+    # compose network. Uncomment to inspect from the host.
+    # ports: ["127.0.0.1:5432:5432"]
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24-alpine
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    ulimits:
+      nofile: { soft: 262144, hard: 262144 }
+    volumes:
+      - ../../data/clickhouse:/var/lib/clickhouse
+      - ../../data/clickhouse-logs:/var/log/clickhouse-server
+    healthcheck:
+      test: ["CMD-SHELL", "wget -nv -t1 -qO- http://127.0.0.1:8123/ping || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    # ports: ["127.0.0.1:8123:8123", "127.0.0.1:9000:9000"]
+
+  agent:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: vlr-main-agent:latest
+    restart: unless-stopped
+    depends_on:
+      postgres: { condition: service_healthy }
+      clickhouse: { condition: service_healthy }
+    environment:
+      AGENT_LISTEN: 0.0.0.0:8443
+      AGENT_API_TOKEN: ${AGENT_API_TOKEN:?set AGENT_API_TOKEN in .env}
+      POSTGRES_DSN: postgres://${POSTGRES_USER:-vlr}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-vlr}?sslmode=disable
+      CLICKHOUSE_ADDR: clickhouse:9000
+      CLICKHOUSE_DB: ${CLICKHOUSE_DB:-vlr}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-}
+      PULL_THRESHOLD_BYTES: ${PULL_THRESHOLD_BYTES:-268435456}
+      RECONCILE_SECONDS: ${RECONCILE_SECONDS:-600}
+      DOWN_AFTER_MISSES: ${DOWN_AFTER_MISSES:-3}
+      NODE_CA_FILE: ${NODE_CA_FILE:-}
+      NODE_TLS_INSECURE: ${NODE_TLS_INSECURE:-0}
+    ports:
+      - "${AGENT_PORT:-8443}:8443"
+
+  # TLS terminator (opt-in): `docker compose --profile tls up -d`. Put a real
+  # domain in AGENT_DOMAIN (.env) so Caddy fetches a Let's Encrypt cert; it then
+  # proxies HTTPS -> agent:8443. Without it the agent is plain HTTP — never expose
+  # :8443 to the internet directly.
+  caddy:
+    image: caddy:2-alpine
+    profiles: ["tls"]
+    restart: unless-stopped
+    depends_on: [agent]
+    environment:
+      AGENT_DOMAIN: ${AGENT_DOMAIN:-localhost}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ../../data/caddy:/data
+      - ../../data/caddy-config:/config
+
+  # The Telegram subscription-gate bot is a separate component (own repo/image).
+  # Placeholder wiring — point it at the agent API once built:
+  # bot:
+  #   image: vlr-main-bot:latest
+  #   restart: unless-stopped
+  #   environment:
+  #     BOT_TOKEN: ${BOT_TOKEN:?}
+  #     AGENT_URL: http://agent:8443
+  #     AGENT_API_TOKEN: ${AGENT_API_TOKEN}
+  #   depends_on: [agent]

@@ -1,0 +1,11 @@
+.git
+.gitignore
+README.md
+Makefile
+install.sh
+deploy/
+data/
+*.md
+.env
+.env.*
+!.env.example

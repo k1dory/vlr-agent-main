@@ -1,0 +1,9 @@
+# TLS terminator in front of the agent API.
+# - Set AGENT_DOMAIN to a real domain (with public 80/443 reachable) and Caddy
+#   gets a Let's Encrypt cert automatically.
+# - Left as the default `localhost`, Caddy serves its own local CA cert (still
+#   encrypted, good for testing).
+{$AGENT_DOMAIN:localhost} {
+	encode gzip
+	reverse_proxy agent:8443
+}
