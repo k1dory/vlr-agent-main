@@ -49,6 +49,10 @@ services:
     build:
       context: ../..
       dockerfile: Dockerfile
+      args:
+        # Set GO_BUILD_PAR=1 in the environment on a low-RAM VPS to cap the Go
+        # build parallelism and avoid swap-thrash/OOM during the compile.
+        GO_BUILD_PAR: ${GO_BUILD_PAR:-0}
     image: vlr-main-agent:latest
     restart: unless-stopped
     depends_on:
@@ -81,9 +85,12 @@ services:
     depends_on: [agent]
     environment:
       AGENT_DOMAIN: ${AGENT_DOMAIN:-localhost}
+      # Serve HTTPS here. Set to a free port (e.g. 9443) when 443 is taken on the
+      # host; ACME still validates over port 80.
+      AGENT_HTTPS_PORT: ${AGENT_HTTPS_PORT:-443}
     ports:
       - "80:80"
-      - "443:443"
+      - "${AGENT_HTTPS_PORT:-443}:${AGENT_HTTPS_PORT:-443}"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - ../../data/caddy:/data

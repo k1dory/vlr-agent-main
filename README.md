@@ -60,6 +60,10 @@ make ps
 
 ## Register a node, then manage users
 
+**Easiest:** run `vlr node connect` *on the node* — it switches the node to the
+`child` role, generates the tokens, and registers it here for you (pass
+`--agent-token <AGENT_API_TOKEN>`). The manual equivalent from the main side:
+
 ```bash
 TOKEN=$(grep ^AGENT_API_TOKEN= deploy/compose/.env | cut -d= -f2)
 

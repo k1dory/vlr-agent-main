@@ -1,9 +1,16 @@
 # TLS terminator in front of the agent API.
-# - Set AGENT_DOMAIN to a real domain (with public 80/443 reachable) and Caddy
-#   gets a Let's Encrypt cert automatically.
-# - Left as the default `localhost`, Caddy serves its own local CA cert (still
-#   encrypted, good for testing).
-{$AGENT_DOMAIN:localhost} {
+# - Set AGENT_DOMAIN to a real domain (A-record -> this box) and Caddy fetches a
+#   Let's Encrypt cert automatically.
+# - AGENT_HTTPS_PORT lets the agent live on a NON-443 port when 443 is already
+#   used by something else on the host (e.g. an mtg/MTProto proxy). The ACME
+#   HTTP-01 challenge still runs on port 80 (which must be free + reachable), so
+#   a real cert is issued even though HTTPS is served elsewhere.
+# - Left as the default `localhost`, Caddy serves its own local CA cert (testing).
+{
+	http_port 80
+}
+
+{$AGENT_DOMAIN:localhost}:{$AGENT_HTTPS_PORT:443} {
 	encode gzip
 	reverse_proxy agent:8443
 }
