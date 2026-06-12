@@ -24,6 +24,11 @@ type Config struct {
 	ClickHouseUser string
 	ClickHousePass string
 
+	// Subscription presentation (HTTP headers clients read).
+	SubTitle      string // default Profile-Title, e.g. "🎓 Обучение у Александры Олейник"
+	SubUpdateHrs  int    // Profile-Update-Interval (hours)
+	SubSupportURL string // Support-URL shown in the client
+
 	// Delta-pull tuning (mirrors vlr's main config).
 	PullThresholdBytes int64
 	ReconcileEvery     time.Duration
@@ -71,6 +76,9 @@ func FromEnv() (Config, error) {
 		HeartbeatInterval:  time.Duration(envInt64("HEARTBEAT_SECONDS", 20)) * time.Second,
 		NodeCAFile:         os.Getenv("NODE_CA_FILE"),
 		NodeTLSInsecure:    os.Getenv("NODE_TLS_INSECURE") == "1",
+		SubTitle:           os.Getenv("AGENT_SUB_TITLE"),
+		SubUpdateHrs:       int(envInt64("AGENT_SUB_UPDATE_HOURS", 12)),
+		SubSupportURL:      os.Getenv("AGENT_SUB_SUPPORT_URL"),
 	}
 	if c.PostgresDSN == "" {
 		return c, fmt.Errorf("POSTGRES_DSN is required")

@@ -42,12 +42,24 @@ CREATE TABLE IF NOT EXISTS users (
     -- High-entropy token for the public /sub/<token> URL. NEVER expose keys via a
     -- guessable ref (telegram_id/email); this is the only public subscription key.
     sub_token    TEXT NOT NULL DEFAULT '',
+    -- Subscription presentation / lifecycle (agent-side metadata; the node never
+    -- sets these, so pulls must not overwrite them).
+    label        TEXT NOT NULL DEFAULT '',   -- per-key display name -> vless:// #fragment ("For Learn 7d")
+    title        TEXT NOT NULL DEFAULT '',   -- per-user Profile-Title override (else AGENT_SUB_TITLE)
+    expires_at   TIMESTAMPTZ,                -- NULL = never expires; past => reaped
     enabled      BOOLEAN NOT NULL DEFAULT true,
     rx_bytes     BIGINT NOT NULL DEFAULT 0,
     tx_bytes     BIGINT NOT NULL DEFAULT 0,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Additive migrations for existing deployments (CREATE TABLE IF NOT EXISTS does
+-- not add columns to a table that already exists). Each is idempotent.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS sub_token  TEXT NOT NULL DEFAULT '';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS label      TEXT NOT NULL DEFAULT '';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS title      TEXT NOT NULL DEFAULT '';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;
 
 CREATE INDEX IF NOT EXISTS users_node_idx     ON users(node_id);
 CREATE INDEX IF NOT EXISTS users_telegram_idx ON users(telegram_id) WHERE telegram_id <> 0;

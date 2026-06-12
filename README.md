@@ -76,10 +76,14 @@ curl -XPOST http://localhost:8443/v1/nodes -H "Authorization: Bearer $TOKEN" -d 
 }'
 
 # 2. create a user on that node (proxied to the node, then resynced centrally)
-curl -XPOST http://localhost:8443/v1/users -H "Authorization: Bearer $TOKEN" \
-  -d '{"node_id":"ru-yc-msk-01","telegram_id":9876567,"profile":"vision"}'
+curl -XPOST http://localhost:8443/v1/users -H "Authorization: Bearer $TOKEN" -d '{
+  "node_id":"ru-yc-msk-01", "telegram_id":9876567, "profile":"vision",
+  "label":"For Learn 7d",          # per-key name -> vless:// #fragment
+  "title":"🎓 Обучение у Александры Олейник",  # overrides AGENT_SUB_TITLE for this user
+  "expires_in":"7d"                # 7d / 30d / 12h ; the reaper deletes the key after
+}'
 # -> { "uuid":"...", "link":"vless://...", "subscription":"<base64>",
-#      "sub_token":"<32 hex>", "sub_path":"/sub/<32 hex>" }
+#      "sub_token":"<32 hex>", "sub_path":"/sub/<32 hex>", "expires_at":"2026-..." }
 
 # 3. list / delete  (delete by uuid|email|id|telegram-id — admin, token-guarded)
 curl http://localhost:8443/v1/users -H "Authorization: Bearer $TOKEN"
@@ -110,6 +114,24 @@ Point the node's heartbeat at the agent: set the node's `child.main_url` to
 > (`docker compose --profile tls up -d`, set `AGENT_DOMAIN`) or your own proxy.
 > `/sub/<token>` is the only unauthenticated path and it accepts **only** the
 > high-entropy sub_token (or the uuid) — never a guessable email/telegram id.
+
+### Subscription presentation (name, icon, expiry)
+
+`GET /sub/<token>` sets the headers mainstream clients (v2rayNG / Hiddify / Clash)
+render:
+
+| What the user sees | Source |
+|---|---|
+| Overall subscription name + "icon" | `Profile-Title` ← per-user `title`, else `AGENT_SUB_TITLE`. Use an emoji as the icon (e.g. `🎓 …`). |
+| Individual key name | the `vless://` `#fragment` ← per-user `label` ("For Learn 7d") |
+| Used traffic + expiry date | `Subscription-Userinfo: ...; expire=<unix>` ← per-user `expires_at` |
+| Auto-update interval | `Profile-Update-Interval` ← `AGENT_SUB_UPDATE_HOURS` |
+
+There is no standard *image* icon header — the emoji in the title/label is what
+every client shows. **Expiry is enforced**, not just displayed: a background
+reaper deletes a user on its node (and here) once `expires_at` passes, so the key
+stops working. Defaults live in `.env` (`AGENT_SUB_TITLE`, `AGENT_SUB_UPDATE_HOURS`,
+`AGENT_SUB_SUPPORT_URL`).
 
 ### TLS to the nodes
 

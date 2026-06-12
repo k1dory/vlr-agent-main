@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/k1dory/vlr-main-agent/internal/config"
@@ -89,6 +90,51 @@ func (c *Collector) tick(ctx context.Context, th wire.Thresholds) {
 			}
 		}
 	}
+	c.reapExpired(ctx)
+}
+
+// reapExpired removes users past their expires_at: it deletes them on the owning
+// node (so the key stops working) and from PostgreSQL. This is what actually
+// enforces the expiry the subscription advertises.
+func (c *Collector) reapExpired(ctx context.Context) {
+	expired, err := c.pg.ExpiredUsers(ctx)
+	if err != nil {
+		c.log.Warn("list expired users failed", "err", err)
+		return
+	}
+	for _, e := range expired {
+		reg, ok, rerr := c.pg.Reg(ctx, e.NodeID)
+		if rerr == nil && ok && reg.UserAPIURL != "" {
+			if derr := c.deleteOnNode(ctx, reg, e.UUID); derr != nil {
+				c.log.Warn("reap: node delete failed, will retry", "uuid", e.UUID, "err", derr)
+				continue // leave it; retry next tick rather than orphan a live key
+			}
+		}
+		if derr := c.pg.DeleteUser(ctx, e.UUID); derr != nil {
+			c.log.Warn("reap: pg delete failed", "uuid", e.UUID, "err", derr)
+			continue
+		}
+		c.log.Info("reaped expired user", "uuid", e.UUID, "node", e.NodeID)
+	}
+}
+
+// deleteOnNode calls the node's DELETE /v1/users/<uuid>.
+func (c *Collector) deleteOnNode(ctx context.Context, reg store.NodeReg, uuid string) error {
+	url := strings.TrimRight(reg.UserAPIURL, "/") + "/v1/users/" + uuid
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, url, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+reg.UserAPIToken)
+	resp, err := c.httpc.Do(req)
+	if err != nil {
+		return err
+	}
+	resp.Body.Close()
+	if resp.StatusCode >= 300 && resp.StatusCode != http.StatusNotFound {
+		return fmt.Errorf("node delete %s: status %d", uuid, resp.StatusCode)
+	}
+	return nil
 }
 
 // pull fetches a node's heavy detail and commits it as authoritative.

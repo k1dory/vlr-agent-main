@@ -247,6 +247,9 @@ type UserRow struct {
 	Profile    string
 	ShortID    string
 	SubToken   string
+	Label      string     // per-key display name -> vless:// #fragment
+	Title      string     // per-user Profile-Title override
+	ExpiresAt  *time.Time // nil = never
 	Enabled    bool
 	RxBytes    int64
 	TxBytes    int64
@@ -255,14 +258,14 @@ type UserRow struct {
 }
 
 const userSelectCols = `u.uuid, u.node_id, u.email, u.telegram_id, u.external_id, u.profile,
-		       u.short_id, u.sub_token, u.enabled, u.rx_bytes, u.tx_bytes, u.created_at,
+		       u.short_id, u.sub_token, u.label, u.title, u.expires_at, u.enabled, u.rx_bytes, u.tx_bytes, u.created_at,
 		       n.host, n.port, n.sni, n.public_key, n.fingerprint, COALESCE(n.short_ids,'[]')`
 
 func scanUserRow(row pgx.Row) (UserRow, error) {
 	var u UserRow
 	var shortIDs []byte
 	err := row.Scan(&u.UUID, &u.NodeID, &u.Email, &u.TelegramID, &u.ExternalID, &u.Profile,
-		&u.ShortID, &u.SubToken, &u.Enabled, &u.RxBytes, &u.TxBytes, &u.CreatedAt,
+		&u.ShortID, &u.SubToken, &u.Label, &u.Title, &u.ExpiresAt, &u.Enabled, &u.RxBytes, &u.TxBytes, &u.CreatedAt,
 		&u.Entry.Host, &u.Entry.Port, &u.Entry.SNI, &u.Entry.PublicKey, &u.Entry.Fingerprint, &shortIDs)
 	if err == nil {
 		_ = json.Unmarshal(shortIDs, &u.Entry.ShortIDs)
@@ -306,7 +309,7 @@ func (s *Store) SubUser(ctx context.Context, token string) (UserRow, bool, error
 // ListUsers returns all users (optionally filtered by node), newest first.
 func (s *Store) ListUsers(ctx context.Context, nodeID string) ([]UserRow, error) {
 	q := `SELECT uuid, node_id, email, telegram_id, external_id, profile, short_id,
-	             sub_token, enabled, rx_bytes, tx_bytes, created_at FROM users`
+	             sub_token, label, title, expires_at, enabled, rx_bytes, tx_bytes, created_at FROM users`
 	args := []any{}
 	if nodeID != "" {
 		q += ` WHERE node_id=$1`
@@ -322,7 +325,8 @@ func (s *Store) ListUsers(ctx context.Context, nodeID string) ([]UserRow, error)
 	for rows.Next() {
 		var u UserRow
 		if err := rows.Scan(&u.UUID, &u.NodeID, &u.Email, &u.TelegramID, &u.ExternalID,
-			&u.Profile, &u.ShortID, &u.SubToken, &u.Enabled, &u.RxBytes, &u.TxBytes, &u.CreatedAt); err != nil {
+			&u.Profile, &u.ShortID, &u.SubToken, &u.Label, &u.Title, &u.ExpiresAt,
+			&u.Enabled, &u.RxBytes, &u.TxBytes, &u.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, u)
@@ -338,15 +342,44 @@ func (s *Store) DeleteUser(ctx context.Context, uuid string) error {
 
 // InsertUser stores a user the agent just created on a node, so it is queryable
 // (and its /sub URL works) immediately, before the next pull syncs full detail.
-// Returns the user's sub_token (existing one is kept on conflict).
+// It carries the subscription metadata (label/title/expires_at). Returns the
+// user's sub_token (existing one is kept on conflict).
 func (s *Store) InsertUser(ctx context.Context, u UserRow) (string, error) {
 	var subToken string
 	err := s.pool.QueryRow(ctx, `
-		INSERT INTO users (uuid, node_id, email, telegram_id, external_id, profile, short_id, sub_token, enabled)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,true)
-		ON CONFLICT (uuid) DO UPDATE SET node_id=EXCLUDED.node_id
+		INSERT INTO users (uuid, node_id, email, telegram_id, external_id, profile, short_id, sub_token, label, title, expires_at, enabled)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,true)
+		ON CONFLICT (uuid) DO UPDATE SET
+		  node_id=EXCLUDED.node_id, label=EXCLUDED.label, title=EXCLUDED.title, expires_at=EXCLUDED.expires_at
 		RETURNING sub_token`,
-		u.UUID, u.NodeID, u.Email, u.TelegramID, u.ExternalID, u.Profile, u.ShortID, genToken()).
+		u.UUID, u.NodeID, u.Email, u.TelegramID, u.ExternalID, u.Profile, u.ShortID, genToken(),
+		u.Label, u.Title, u.ExpiresAt).
 		Scan(&subToken)
 	return subToken, err
+}
+
+// ExpiredUser identifies a user past its expiry that must be removed.
+type ExpiredUser struct {
+	UUID   string
+	NodeID string
+}
+
+// ExpiredUsers returns users whose expires_at is in the past (the reaper deletes
+// them on the node and here).
+func (s *Store) ExpiredUsers(ctx context.Context) ([]ExpiredUser, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT uuid, node_id FROM users WHERE expires_at IS NOT NULL AND expires_at < now()`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ExpiredUser
+	for rows.Next() {
+		var e ExpiredUser
+		if err := rows.Scan(&e.UUID, &e.NodeID); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
 }

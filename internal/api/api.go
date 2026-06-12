@@ -7,10 +7,13 @@ package api
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -130,7 +133,42 @@ type createReq struct {
 	TelegramID int64  `json:"telegram_id"`
 	Email      string `json:"email"`
 	ID         string `json:"id"`
-	Profile    string `json:"profile"` // "vision" | ""
+	Profile    string `json:"profile"`    // "vision" | ""
+	Label      string `json:"label"`      // per-key display name -> vless:// #fragment ("For Learn 7d")
+	Title      string `json:"title"`      // per-user Profile-Title override (else AGENT_SUB_TITLE)
+	ExpiresIn  string `json:"expires_in"` // "7d" | "30d" | "12h" | "" (never); takes precedence
+	ExpiresAt  string `json:"expires_at"` // RFC3339 absolute expiry, alternative to expires_in
+}
+
+// parseExpiry resolves the requested expiry into an absolute time (nil = never).
+// Accepts "<N>d" (days) and anything time.ParseDuration understands for the
+// relative form, or an RFC3339 timestamp for the absolute form.
+func parseExpiry(in, at string) (*time.Time, error) {
+	if in != "" {
+		var d time.Duration
+		var err error
+		if strings.HasSuffix(in, "d") {
+			var days int
+			if _, err = fmt.Sscanf(in, "%dd", &days); err == nil {
+				d = time.Duration(days) * 24 * time.Hour
+			}
+		} else {
+			d, err = time.ParseDuration(in)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("bad expires_in %q (use 7d, 12h, ...)", in)
+		}
+		t := time.Now().Add(d).UTC()
+		return &t, nil
+	}
+	if at != "" {
+		t, err := time.Parse(time.RFC3339, at)
+		if err != nil {
+			return nil, fmt.Errorf("bad expires_at %q (use RFC3339)", at)
+		}
+		return &t, nil
+	}
+	return nil, nil
 }
 
 func (s *Server) handleUsers(w http.ResponseWriter, r *http.Request) {
@@ -156,6 +194,11 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
 	var req createReq
 	if err := readJSON(r, &req); err != nil || req.NodeID == "" {
 		http.Error(w, "node_id required", http.StatusBadRequest)
+		return
+	}
+	expiresAt, err := parseExpiry(req.ExpiresIn, req.ExpiresAt)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	reg, ok, err := s.pg.Reg(r.Context(), req.NodeID)
@@ -192,6 +235,7 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
 	subToken, ierr := s.pg.InsertUser(r.Context(), store.UserRow{
 		UUID: cr.UUID, NodeID: req.NodeID, Email: req.Email,
 		TelegramID: req.TelegramID, ExternalID: req.ID, Profile: req.Profile,
+		Label: req.Label, Title: req.Title, ExpiresAt: expiresAt,
 	})
 	if ierr != nil {
 		s.log.Warn("insert user after create failed", "uuid", cr.UUID, "err", ierr)
@@ -199,13 +243,17 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
 	if err := s.coll.Pull(r.Context(), req.NodeID); err != nil {
 		s.log.Warn("resync pull after create failed", "node", req.NodeID, "err", err)
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{
+	resp2 := map[string]any{
 		"uuid":         cr.UUID,
 		"link":         cr.Link,
 		"subscription": cr.Subscription,
 		"sub_token":    subToken,
 		"sub_path":     "/sub/" + subToken,
-	})
+	}
+	if expiresAt != nil {
+		resp2["expires_at"] = expiresAt.Format(time.RFC3339)
+	}
+	writeJSON(w, http.StatusCreated, resp2)
 }
 
 func (s *Server) handleUserByRef(w http.ResponseWriter, r *http.Request) {
@@ -269,13 +317,41 @@ func (s *Server) handleSub(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
+	if u.ExpiresAt != nil && time.Now().After(*u.ExpiresAt) {
+		http.Error(w, "subscription expired", http.StatusGone) // reaper will delete it shortly
+		return
+	}
 	su := sub.User{
 		UUID: u.UUID, Email: u.Email, TelegramID: u.TelegramID, ExternalID: u.ExternalID,
-		ShortID: u.ShortID, Profile: u.Profile, Enabled: u.Enabled,
+		ShortID: u.ShortID, Profile: u.Profile, Label: u.Label, Enabled: u.Enabled,
 	}
 	body := sub.Stream(u.Entry, []sub.User{su})
+
+	// Presentation headers every mainstream client (v2rayNG/Hiddify/Clash) reads.
+	title := u.Title
+	if title == "" {
+		title = s.cfg.SubTitle
+	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.Header().Set("Profile-Title", "VLR")
+	if title != "" {
+		// base64 form is the portable way to carry non-ASCII (Cyrillic/emoji).
+		w.Header().Set("Profile-Title", "base64:"+base64.StdEncoding.EncodeToString([]byte(title)))
+	}
+	if s.cfg.SubUpdateHrs > 0 {
+		w.Header().Set("Profile-Update-Interval", strconv.Itoa(s.cfg.SubUpdateHrs))
+	}
+	if s.cfg.SubSupportURL != "" {
+		w.Header().Set("Support-URL", s.cfg.SubSupportURL)
+	}
+	// Subscription-Userinfo: used traffic + expiry. expire is a unix timestamp
+	// (0 = unlimited); the client renders the remaining-days / expiry date from it.
+	var expire int64
+	if u.ExpiresAt != nil {
+		expire = u.ExpiresAt.Unix()
+	}
+	w.Header().Set("Subscription-Userinfo",
+		fmt.Sprintf("upload=0; download=%d; total=0; expire=%d", u.RxBytes+u.TxBytes, expire))
+
 	_, _ = w.Write([]byte(body))
 }
 

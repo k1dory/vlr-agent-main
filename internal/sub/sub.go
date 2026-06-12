@@ -21,6 +21,7 @@ type User struct {
 	ExternalID string
 	ShortID    string
 	Profile    string // "vision" => xtls-rprx-vision; empty => plain Reality
+	Label      string // explicit display name -> vless:// #fragment (e.g. "For Learn 7d")
 	Enabled    bool
 }
 
@@ -46,9 +47,12 @@ func Link(entry wire.EntrySnapshot, u User) string {
 		u.UUID, entry.Host, entry.Port, q.Encode(), url.PathEscape(label(u)))
 }
 
-// label picks a human tag for the link: email, else tg<id>, else external id,
-// else a short uuid. Never empty. Mirrors vlr's userLabel.
+// label picks a human tag for the link: an explicit Label wins, else email, else
+// tg<id>, else external id, else a short uuid. Never empty.
 func label(u User) string {
+	if u.Label != "" {
+		return u.Label
+	}
 	switch {
 	case u.Email != "":
 		return u.Email
