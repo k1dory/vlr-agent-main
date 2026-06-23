@@ -99,13 +99,40 @@ services:
       - ../../data/caddy:/data
       - ../../data/caddy-config:/config
 
-  # The Telegram subscription-gate bot is a separate component (own repo/image).
-  # Placeholder wiring — point it at the agent API once built:
-  # bot:
-  #   image: vlr-main-bot:latest
-  #   restart: unless-stopped
-  #   environment:
-  #     BOT_TOKEN: ${BOT_TOKEN:?}
-  #     AGENT_URL: http://agent:8443
-  #     AGENT_API_TOKEN: ${AGENT_API_TOKEN}
-  #   depends_on: [agent]
+  # Telegram subscription-gate bot (../../bot). Gates VPN access on channel
+  # membership: subscribed -> issues a /sub link via the agent API; left -> revokes.
+  # Shares one SQLite ledger volume with its worker.
+  bot:
+    build:
+      context: ../../bot
+      dockerfile: Dockerfile
+    image: vlr-main-bot:latest
+    restart: unless-stopped
+    command: ["python", "-m", "app.bot"]
+    depends_on: [agent]
+    environment: &bot_env
+      BOT_TOKEN: ${BOT_TOKEN:?set BOT_TOKEN in .env}
+      CHANNEL: ${CHANNEL:?set CHANNEL in .env}
+      CHANNEL_INVITE: ${CHANNEL_INVITE:?set CHANNEL_INVITE in .env}
+      AGENT_URL: ${AGENT_URL:-http://agent:8443}
+      AGENT_API_TOKEN: ${AGENT_API_TOKEN}
+      NODE_ID: ${NODE_ID:?set NODE_ID in .env}
+      PUBLIC_SUB_BASE: ${PUBLIC_SUB_BASE:?set PUBLIC_SUB_BASE in .env}
+      SUB_EXPIRES_IN: ${SUB_EXPIRES_IN:-}
+      SUB_LABEL: ${SUB_LABEL:-}
+      SUB_TITLE: ${SUB_TITLE:-}
+      DATABASE_URL: sqlite+aiosqlite:////data/bot.db
+      SWEEP_INTERVAL_SECONDS: ${SWEEP_INTERVAL_SECONDS:-600}
+    volumes:
+      - ../../data/bot:/data
+
+  # Reconciliation worker — periodically re-checks membership and revokes leavers
+  # the realtime chat_member update may have missed (restart, dropped update).
+  worker:
+    image: vlr-main-bot:latest
+    restart: unless-stopped
+    command: ["python", "-m", "app.worker"]
+    depends_on: [agent, bot]
+    environment: *bot_env
+    volumes:
+      - ../../data/bot:/data
