@@ -81,8 +81,11 @@ services:
       PORTAL_HEADER: ${PORTAL_HEADER:-X-Authentik-Email}
       PORTAL_PROFILE: ${PORTAL_PROFILE:-}
       AUTHENTIK_WEBHOOK_SECRET: ${AUTHENTIK_WEBHOOK_SECRET:-}
+    # Bind the raw agent API to localhost only — it must sit behind TLS (the
+    # bundled caddy / the portal Caddy), never be exposed on 0.0.0.0. A fronting
+    # proxy reaches it over the compose network as agent:8443 regardless.
     ports:
-      - "${AGENT_PORT:-8443}:8443"
+      - "127.0.0.1:${AGENT_PORT:-8443}:8443"
 
   # TLS terminator (opt-in): `docker compose --profile tls up -d`. Put a real
   # domain in AGENT_DOMAIN (.env) so Caddy fetches a Let's Encrypt cert; it then
@@ -118,14 +121,18 @@ services:
     restart: unless-stopped
     command: ["python", "-m", "app.bot"]
     depends_on: [agent]
+    # NOTE: these use ${VAR:-} (not ${VAR:?}) on purpose. Compose interpolates the
+    # WHOLE file before applying profiles, so a required (:?) var here would block
+    # `up` even when the bot profile is off. Fill them in .env before running the
+    # bot with `--profile bot`; the bot validates them itself at startup.
     environment: &bot_env
-      BOT_TOKEN: ${BOT_TOKEN:?set BOT_TOKEN in .env}
-      CHANNEL: ${CHANNEL:?set CHANNEL in .env}
-      CHANNEL_INVITE: ${CHANNEL_INVITE:?set CHANNEL_INVITE in .env}
+      BOT_TOKEN: ${BOT_TOKEN:-}
+      CHANNEL: ${CHANNEL:-}
+      CHANNEL_INVITE: ${CHANNEL_INVITE:-https://t.me/your_channel}
       AGENT_URL: ${AGENT_URL:-http://agent:8443}
       AGENT_API_TOKEN: ${AGENT_API_TOKEN}
-      NODE_ID: ${NODE_ID:?set NODE_ID in .env}
-      PUBLIC_SUB_BASE: ${PUBLIC_SUB_BASE:?set PUBLIC_SUB_BASE in .env}
+      NODE_ID: ${NODE_ID:-}
+      PUBLIC_SUB_BASE: ${PUBLIC_SUB_BASE:-}
       SUB_EXPIRES_IN: ${SUB_EXPIRES_IN:-}
       SUB_LABEL: ${SUB_LABEL:-}
       SUB_TITLE: ${SUB_TITLE:-}
