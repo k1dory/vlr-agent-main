@@ -15,13 +15,23 @@ services:
   # reaches it over the compose network as agent:8443. Nothing to override here —
   # do NOT re-declare agent ports (compose MERGES port lists, causing a double bind).
 
+  # Dedicated Authentik proxy outpost. Connects OUTBOUND to Authentik with its
+  # token, pulls the provider config, and answers the local forward_auth on :9000.
+  # This is what makes cross-host SSO reliable (no header mangling via EDGE Caddy).
+  ak-proxy:
+    image: ghcr.io/goauthentik/proxy:${AUTHENTIK_TAG:-2026.5.4}
+    restart: unless-stopped
+    environment:
+      AUTHENTIK_HOST: ${AUTHENTIK_URL:-https://auth.genomed-security.ru}
+      AUTHENTIK_INSECURE: "false"
+      AUTHENTIK_TOKEN: ${AK_OUTPOST_TOKEN:?set AK_OUTPOST_TOKEN in .env}
+
   portal:
     image: caddy:2-alpine
     restart: unless-stopped
-    depends_on: [agent]
+    depends_on: [agent, ak-proxy]
     environment:
       PORTAL_DOMAIN: ${PORTAL_DOMAIN:?set PORTAL_DOMAIN in .env}
-      AUTHENTIK_HOST: ${AUTHENTIK_HOST:?set AUTHENTIK_HOST in .env}
     ports:
       - "80:80"
       - "443:443"

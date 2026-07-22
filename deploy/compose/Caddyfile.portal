@@ -1,20 +1,19 @@
-# Portal + subscription front for the vlr-main-agent, gated by a REMOTE Authentik.
+# Portal + subscription front for the vlr-main-agent, gated by Authentik via a
+# DEDICATED proxy outpost (ak-proxy) running on THIS host.
 #
-# This runs on the control-plane host (separate from EDGE where Authentik lives).
-# forward_auth calls the Authentik embedded outpost over HTTPS at AUTHENTIK_HOST;
-# the outpost's own paths are proxied through this domain so the login callback
-# lands here and sets the session cookie for THIS domain.
+# Why a dedicated outpost: the official Authentik forward_auth talks directly to
+# an outpost on :9000. Going through the remote EDGE Caddy to the embedded outpost
+# mangles X-Forwarded-Host (the header the outpost uses to match the application),
+# so it 404s. The local ak-proxy avoids that extra hop; it connects OUTBOUND to
+# Authentik for its config, so no inbound headers get rewritten.
 #
 # Routing:
 #   /sub/*                    public — the subscription URL clients poll (token = secret)
-#   /v1/*                     public path, but every /v1 endpoint is token-guarded by
-#                             the agent itself (heartbeat token, AGENT_API_TOKEN,
-#                             AUTHENTIK_WEBHOOK_SECRET) — so nodes can heartbeat and
-#                             Authentik can POST the revoke webhook here
-#   /outpost.goauthentik.io/* proxied to Authentik (login + callback)
-#   everything else           Authentik forward-auth → agent /me portal (QR + link)
+#   /v1/*                     public path, token-guarded by the agent itself
+#   /outpost.goauthentik.io/* the outpost's own login/callback endpoints -> ak-proxy
+#   everything else           forward-auth via ak-proxy -> agent /me portal (QR + link)
 #
-# Required env (compose passes them): PORTAL_DOMAIN, AUTHENTIK_HOST.
+# Required env (compose passes it): PORTAL_DOMAIN.
 
 {$PORTAL_DOMAIN} {
 	encode gzip
@@ -27,19 +26,19 @@
 		reverse_proxy agent:8443
 	}
 
+	# The outpost's own endpoints (login redirect + callback) must be reachable
+	# without prior auth.
 	handle /outpost.goauthentik.io/* {
-		reverse_proxy https://{$AUTHENTIK_HOST} {
-			header_up Host {$AUTHENTIK_HOST}
-		}
+		reverse_proxy ak-proxy:9000
 	}
 
+	# Everything else = the portal, gated by Authentik forward-auth.
 	handle {
-		forward_auth https://{$AUTHENTIK_HOST} {
+		forward_auth ak-proxy:9000 {
 			uri /outpost.goauthentik.io/auth/caddy
-			header_up Host {$AUTHENTIK_HOST}
-			# Copy identity from the outpost onto the upstream request. This
-			# OVERWRITES anything the client sent — X-Authentik-Email can't be spoofed.
-			copy_headers X-Authentik-Username X-Authentik-Email X-Authentik-Groups
+			# Capitalization matters — otherwise the copied headers arrive empty.
+			copy_headers X-Authentik-Username X-Authentik-Groups X-Authentik-Email X-Authentik-Name X-Authentik-Uid
+			trusted_proxies private_ranges
 		}
 		# The portal handler ignores the path; normalize everything to /me.
 		rewrite * /me
