@@ -1,0 +1,33 @@
+# Portal overlay: adds the Authentik-gated portal + subscription front (Caddy with
+# Caddyfile.portal) and stops publishing the agent's raw :8443 to the world.
+#
+# Bring the whole control plane up WITH the portal:
+#   docker compose -f docker-compose.yml -f docker-compose.portal.yml up -d
+#
+# (postgres + clickhouse + agent + portal. The base `caddy` and `bot` services stay
+# off — they are behind their own profiles.)
+#
+# Needs in .env: PORTAL_DOMAIN, AUTHENTIK_HOST, PUBLIC_SUB_BASE, PORTAL_NODE_ID,
+# AUTHENTIK_WEBHOOK_SECRET (see .env.example).
+
+services:
+  agent:
+    # Do not expose the agent directly; only the portal Caddy (same network)
+    # reaches agent:8443. Keep a localhost bind for debugging.
+    ports:
+      - "127.0.0.1:8443:8443"
+
+  portal:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on: [agent]
+    environment:
+      PORTAL_DOMAIN: ${PORTAL_DOMAIN:?set PORTAL_DOMAIN in .env}
+      AUTHENTIK_HOST: ${AUTHENTIK_HOST:?set AUTHENTIK_HOST in .env}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile.portal:/etc/caddy/Caddyfile:ro
+      - ../../data/portal-caddy:/data
+      - ../../data/portal-caddy-config:/config

@@ -41,14 +41,21 @@ func New(cfg config.Config, pg *store.Store, coll *collector.Collector, log *slo
 // Handler builds the mux.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/heartbeat", s.handleHeartbeat)       // node -> agent
-	mux.HandleFunc("/v1/nodes", s.guard(s.handleNodes))      // operator
-	mux.HandleFunc("/v1/users", s.guard(s.handleUsers))      // operator
-	mux.HandleFunc("/v1/users/", s.guard(s.handleUserByRef)) // operator (DELETE)
-	mux.HandleFunc("/sub/", s.handleSub)                     // client subscription URL
+	mux.HandleFunc("/v1/heartbeat", s.handleHeartbeat)            // node -> agent
+	mux.HandleFunc("/v1/nodes", s.guard(s.handleNodes))           // operator
+	mux.HandleFunc("/v1/users", s.guard(s.handleUsers))           // operator
+	mux.HandleFunc("/v1/users/", s.guard(s.handleUserByRef))      // operator (DELETE)
+	mux.HandleFunc("/sub/", s.handleSub)                          // client subscription URL
+	mux.HandleFunc("/v1/authentik/event", s.handleAuthentikEvent) // Authentik auto-revoke webhook
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	})
+	// Self-service portal (behind Authentik forward-auth). "/" is the vhost root,
+	// so register it last; more specific routes above still win (ServeMux).
+	if s.cfg.PortalEnabled() {
+		mux.HandleFunc("/me", s.handlePortal)
+		mux.HandleFunc("/", s.handlePortal)
+	}
 	return mux
 }
 
@@ -187,52 +194,54 @@ func (s *Server) handleUsers(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// createUser proxies the create to the owning node (which mutates the Xray
-// config), then resyncs that node so the central PG/ClickHouse reflect the new
-// key, and returns the node's link + base64 subscription.
-func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
-	var req createReq
-	if err := readJSON(r, &req); err != nil || req.NodeID == "" {
-		http.Error(w, "node_id required", http.StatusBadRequest)
-		return
+// provisioned is the result of creating a user centrally.
+type provisioned struct {
+	UUID         string
+	Link         string
+	Subscription string
+	SubToken     string
+	ExpiresAt    *time.Time
+}
+
+// provision proxies the create to the owning node (which mutates the Xray config),
+// then resyncs that node so the central PG/ClickHouse reflect the new key. It is
+// the shared core behind POST /v1/users and the /me portal. On failure it returns
+// an HTTP status the caller can surface and a descriptive error.
+func (s *Server) provision(ctx context.Context, req createReq) (provisioned, int, error) {
+	if req.NodeID == "" {
+		return provisioned{}, http.StatusBadRequest, fmt.Errorf("node_id required")
 	}
 	expiresAt, err := parseExpiry(req.ExpiresIn, req.ExpiresAt)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
+		return provisioned{}, http.StatusBadRequest, err
 	}
-	reg, ok, err := s.pg.Reg(r.Context(), req.NodeID)
+	reg, ok, err := s.pg.Reg(ctx, req.NodeID)
 	if err != nil || !ok {
-		http.Error(w, "unknown node", http.StatusNotFound)
-		return
+		return provisioned{}, http.StatusNotFound, fmt.Errorf("unknown node %q", req.NodeID)
 	}
 	if reg.UserAPIURL == "" {
-		http.Error(w, "node has no user_api_url registered", http.StatusBadRequest)
-		return
+		return provisioned{}, http.StatusBadRequest, fmt.Errorf("node has no user_api_url registered")
 	}
 	body, _ := json.Marshal(wire.CreateUserReq{
 		TelegramID: req.TelegramID, Email: req.Email, ID: req.ID, Profile: req.Profile,
 	})
-	resp, err := s.nodeCall(r.Context(), http.MethodPost,
+	resp, err := s.nodeCall(ctx, http.MethodPost,
 		strings.TrimRight(reg.UserAPIURL, "/")+"/v1/users", reg.UserAPIToken, body)
 	if err != nil {
-		http.Error(w, "node call failed: "+err.Error(), http.StatusBadGateway)
-		return
+		return provisioned{}, http.StatusBadGateway, fmt.Errorf("node call failed: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<14))
-		http.Error(w, "node rejected: "+string(b), http.StatusBadGateway)
-		return
+		return provisioned{}, http.StatusBadGateway, fmt.Errorf("node rejected: %s", string(b))
 	}
 	var cr wire.CreateUserResp
 	if err := json.NewDecoder(resp.Body).Decode(&cr); err != nil {
-		http.Error(w, "bad node response", http.StatusBadGateway)
-		return
+		return provisioned{}, http.StatusBadGateway, fmt.Errorf("bad node response")
 	}
 	// Insert the row immediately so it is listable and its /sub URL works even if
 	// the resync pull below fails; the pull then fills traffic/short_id detail.
-	subToken, ierr := s.pg.InsertUser(r.Context(), store.UserRow{
+	subToken, ierr := s.pg.InsertUser(ctx, store.UserRow{
 		UUID: cr.UUID, NodeID: req.NodeID, Email: req.Email,
 		TelegramID: req.TelegramID, ExternalID: req.ID, Profile: req.Profile,
 		Label: req.Label, Title: req.Title, ExpiresAt: expiresAt,
@@ -240,18 +249,33 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
 	if ierr != nil {
 		s.log.Warn("insert user after create failed", "uuid", cr.UUID, "err", ierr)
 	}
-	if err := s.coll.Pull(r.Context(), req.NodeID); err != nil {
+	if err := s.coll.Pull(ctx, req.NodeID); err != nil {
 		s.log.Warn("resync pull after create failed", "node", req.NodeID, "err", err)
 	}
-	resp2 := map[string]any{
-		"uuid":         cr.UUID,
-		"link":         cr.Link,
-		"subscription": cr.Subscription,
-		"sub_token":    subToken,
-		"sub_path":     "/sub/" + subToken,
+	return provisioned{UUID: cr.UUID, Link: cr.Link, Subscription: cr.Subscription, SubToken: subToken, ExpiresAt: expiresAt}, http.StatusCreated, nil
+}
+
+// createUser is the management API create (POST /v1/users).
+func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
+	var req createReq
+	if err := readJSON(r, &req); err != nil {
+		http.Error(w, "bad json", http.StatusBadRequest)
+		return
 	}
-	if expiresAt != nil {
-		resp2["expires_at"] = expiresAt.Format(time.RFC3339)
+	p, code, err := s.provision(r.Context(), req)
+	if err != nil {
+		http.Error(w, err.Error(), code)
+		return
+	}
+	resp2 := map[string]any{
+		"uuid":         p.UUID,
+		"link":         p.Link,
+		"subscription": p.Subscription,
+		"sub_token":    p.SubToken,
+		"sub_path":     "/sub/" + p.SubToken,
+	}
+	if p.ExpiresAt != nil {
+		resp2["expires_at"] = p.ExpiresAt.Format(time.RFC3339)
 	}
 	writeJSON(w, http.StatusCreated, resp2)
 }
@@ -275,25 +299,33 @@ func (s *Server) handleUserByRef(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
-	reg, ok, _ := s.pg.Reg(r.Context(), u.NodeID)
-	if ok && reg.UserAPIURL != "" {
-		resp, err := s.nodeCall(r.Context(), http.MethodDelete,
-			strings.TrimRight(reg.UserAPIURL, "/")+"/v1/users/"+u.UUID, reg.UserAPIToken, nil)
-		if err != nil {
-			http.Error(w, "node call failed: "+err.Error(), http.StatusBadGateway)
-			return
-		}
-		resp.Body.Close()
-		if resp.StatusCode >= 300 && resp.StatusCode != http.StatusNotFound {
-			http.Error(w, "node rejected delete", http.StatusBadGateway)
-			return
-		}
-	}
-	if err := s.pg.DeleteUser(r.Context(), u.UUID); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	if err := s.deleteUserEverywhere(r.Context(), u); err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"removed": u.UUID})
+}
+
+// deleteUserEverywhere removes a user on its owning node (which rewrites the Xray
+// config) and then from PostgreSQL. Shared by the admin DELETE and the Authentik
+// auto-revoke webhook. A node 404 is tolerated (already gone there).
+func (s *Server) deleteUserEverywhere(ctx context.Context, u store.UserRow) error {
+	reg, ok, _ := s.pg.Reg(ctx, u.NodeID)
+	if ok && reg.UserAPIURL != "" {
+		resp, err := s.nodeCall(ctx, http.MethodDelete,
+			strings.TrimRight(reg.UserAPIURL, "/")+"/v1/users/"+u.UUID, reg.UserAPIToken, nil)
+		if err != nil {
+			return fmt.Errorf("node call failed: %w", err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode >= 300 && resp.StatusCode != http.StatusNotFound {
+			return fmt.Errorf("node rejected delete")
+		}
+	}
+	if err := s.pg.DeleteUser(ctx, u.UUID); err != nil {
+		return err
+	}
+	return nil
 }
 
 // --- subscription -----------------------------------------------------------

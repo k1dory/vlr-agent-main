@@ -74,6 +74,13 @@ services:
       AGENT_SUB_TITLE: ${AGENT_SUB_TITLE:-}
       AGENT_SUB_UPDATE_HOURS: ${AGENT_SUB_UPDATE_HOURS:-12}
       AGENT_SUB_SUPPORT_URL: ${AGENT_SUB_SUPPORT_URL:-}
+      # Self-service portal (GET /me behind Authentik forward-auth) + auto-revoke
+      # webhook. Portal is on only when PUBLIC_SUB_BASE and PORTAL_NODE_ID are set.
+      PUBLIC_SUB_BASE: ${PUBLIC_SUB_BASE:-}
+      PORTAL_NODE_ID: ${PORTAL_NODE_ID:-}
+      PORTAL_HEADER: ${PORTAL_HEADER:-X-Authentik-Email}
+      PORTAL_PROFILE: ${PORTAL_PROFILE:-}
+      AUTHENTIK_WEBHOOK_SECRET: ${AUTHENTIK_WEBHOOK_SECRET:-}
     ports:
       - "${AGENT_PORT:-8443}:8443"
 
@@ -107,6 +114,7 @@ services:
       context: ../../bot
       dockerfile: Dockerfile
     image: vlr-main-bot:latest
+    profiles: ["bot"] # opt-in: `docker compose --profile bot up -d` (needs BOT_TOKEN etc)
     restart: unless-stopped
     command: ["python", "-m", "app.bot"]
     depends_on: [agent]
@@ -130,6 +138,7 @@ services:
   # the realtime chat_member update may have missed (restart, dropped update).
   worker:
     image: vlr-main-bot:latest
+    profiles: ["bot"] # opt-in with the bot profile
     restart: unless-stopped
     command: ["python", "-m", "app.worker"]
     depends_on: [agent, bot]

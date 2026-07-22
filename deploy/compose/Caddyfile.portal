@@ -1,0 +1,48 @@
+# Portal + subscription front for the vlr-main-agent, gated by a REMOTE Authentik.
+#
+# This runs on the control-plane host (separate from EDGE where Authentik lives).
+# forward_auth calls the Authentik embedded outpost over HTTPS at AUTHENTIK_HOST;
+# the outpost's own paths are proxied through this domain so the login callback
+# lands here and sets the session cookie for THIS domain.
+#
+# Routing:
+#   /sub/*                    public — the subscription URL clients poll (token = secret)
+#   /v1/*                     public path, but every /v1 endpoint is token-guarded by
+#                             the agent itself (heartbeat token, AGENT_API_TOKEN,
+#                             AUTHENTIK_WEBHOOK_SECRET) — so nodes can heartbeat and
+#                             Authentik can POST the revoke webhook here
+#   /outpost.goauthentik.io/* proxied to Authentik (login + callback)
+#   everything else           Authentik forward-auth → agent /me portal (QR + link)
+#
+# Required env (compose passes them): PORTAL_DOMAIN, AUTHENTIK_HOST.
+
+{$PORTAL_DOMAIN} {
+	encode gzip
+
+	handle /sub/* {
+		reverse_proxy agent:8443
+	}
+
+	handle /v1/* {
+		reverse_proxy agent:8443
+	}
+
+	handle /outpost.goauthentik.io/* {
+		reverse_proxy https://{$AUTHENTIK_HOST} {
+			header_up Host {$AUTHENTIK_HOST}
+		}
+	}
+
+	handle {
+		forward_auth https://{$AUTHENTIK_HOST} {
+			uri /outpost.goauthentik.io/auth/caddy
+			header_up Host {$AUTHENTIK_HOST}
+			# Copy identity from the outpost onto the upstream request. This
+			# OVERWRITES anything the client sent — X-Authentik-Email can't be spoofed.
+			copy_headers X-Authentik-Username X-Authentik-Email X-Authentik-Groups
+		}
+		# The portal handler ignores the path; normalize everything to /me.
+		rewrite * /me
+		reverse_proxy agent:8443
+	}
+}

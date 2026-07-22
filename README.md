@@ -108,7 +108,14 @@ Point the node's heartbeat at the agent: set the node's `child.main_url` to
 | `POST` | `/v1/users` | `AGENT_API_TOKEN` | create on a node (returns link+sub) |
 | `DELETE` | `/v1/users/<ref>` | `AGENT_API_TOKEN` | delete on the owning node (`ref`=uuid/email/id/tg-id) |
 | `GET` | `/sub/<token>` | — | base64 subscription (`token`=per-user sub_token, or uuid) |
+| `GET` | `/me` | Authentik forward-auth | self-service portal: QR + sub-link, auto-provisions on `PORTAL_NODE_ID` |
+| `POST` | `/v1/authentik/event` | `AUTHENTIK_WEBHOOK_SECRET` | Authentik auto-revoke webhook (deactivate → delete) |
 | `GET` | `/healthz` | — | liveness |
+
+> **Authentik portal + auto-revoke** (`/me`, `/v1/authentik/event`) — members of an
+> Authentik group open one application tile and get their personal link+QR;
+> deactivating them in Authentik pulls the key. Deploy with
+> `docker-compose.portal.yml`; full setup in [docs/AUTHENTIK.md](docs/AUTHENTIK.md).
 
 > Put `:8443` behind TLS in production — either the bundled Caddy terminator
 > (`docker compose --profile tls up -d`, set `AGENT_DOMAIN`) or your own proxy.

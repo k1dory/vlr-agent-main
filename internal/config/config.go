@@ -29,6 +29,24 @@ type Config struct {
 	SubUpdateHrs  int    // Profile-Update-Interval (hours)
 	SubSupportURL string // Support-URL shown in the client
 
+	// --- self-service portal (GET /me, behind Authentik forward-auth) ---
+	// SubBaseURL is the public origin that fronts THIS agent's /sub endpoint, e.g.
+	// https://link.infrashark.tech. The portal hands clients <SubBaseURL>/sub/<token>.
+	SubBaseURL string
+	// PortalNodeID is the node the portal auto-provisions its users on (must be a
+	// registered node). Empty => portal disabled.
+	PortalNodeID string
+	// PortalHeader is the request header carrying the authenticated email, set by
+	// the Authentik forward-auth proxy. Default "X-Authentik-Email".
+	PortalHeader string
+	// PortalProfile is the vlr profile portal users get ("" plain Reality, "vision").
+	PortalProfile string
+
+	// AuthentikWebhookSecret is the bearer the Authentik notification webhook must
+	// present to POST /v1/authentik/event (event-driven auto-revoke). Empty => the
+	// webhook endpoint is disabled.
+	AuthentikWebhookSecret string
+
 	// Delta-pull tuning (mirrors vlr's main config).
 	PullThresholdBytes int64
 	ReconcileEvery     time.Duration
@@ -40,6 +58,12 @@ type Config struct {
 	// NODE_TLS_INSECURE=1 to skip verification (lab only).
 	NodeCAFile      string
 	NodeTLSInsecure bool
+}
+
+// PortalEnabled reports whether the self-service /me portal should be mounted: it
+// needs a public sub base to hand out and a node to provision users on.
+func (c Config) PortalEnabled() bool {
+	return c.SubBaseURL != "" && c.PortalNodeID != ""
 }
 
 // NodeHTTPClient builds the HTTP client the agent uses to reach nodes, honouring
@@ -79,6 +103,12 @@ func FromEnv() (Config, error) {
 		SubTitle:           os.Getenv("AGENT_SUB_TITLE"),
 		SubUpdateHrs:       int(envInt64("AGENT_SUB_UPDATE_HOURS", 12)),
 		SubSupportURL:      os.Getenv("AGENT_SUB_SUPPORT_URL"),
+
+		SubBaseURL:             os.Getenv("PUBLIC_SUB_BASE"),
+		PortalNodeID:           os.Getenv("PORTAL_NODE_ID"),
+		PortalHeader:           env("PORTAL_HEADER", "X-Authentik-Email"),
+		PortalProfile:          os.Getenv("PORTAL_PROFILE"),
+		AuthentikWebhookSecret: os.Getenv("AUTHENTIK_WEBHOOK_SECRET"),
 	}
 	if c.PostgresDSN == "" {
 		return c, fmt.Errorf("POSTGRES_DSN is required")
