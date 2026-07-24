@@ -33,11 +33,7 @@ func Link(entry wire.EntrySnapshot, u User) string {
 	q.Set("sni", entry.SNI)
 	q.Set("fp", entry.Fingerprint)
 	q.Set("pbk", entry.PublicKey)
-	sid := u.ShortID
-	if sid == "" && len(entry.ShortIDs) > 0 {
-		sid = entry.ShortIDs[0]
-	}
-	q.Set("sid", sid)
+	q.Set("sid", pickShortID(u.ShortID, entry.ShortIDs))
 	if u.Profile == "vision" {
 		q.Set("flow", "xtls-rprx-vision")
 	}
@@ -45,6 +41,27 @@ func Link(entry wire.EntrySnapshot, u User) string {
 
 	return fmt.Sprintf("vless://%s@%s:%d?%s#%s",
 		u.UUID, entry.Host, entry.Port, q.Encode(), url.PathEscape(label(u)))
+}
+
+// pickShortID returns a Reality short ID that the node CURRENTLY accepts. It keeps
+// the user's stored short ID only if it is still in the node's current set
+// (entry.ShortIDs, from the last pull); otherwise it falls back to the first
+// current one. Short IDs are a per-inbound list, not a per-user secret, so any
+// entry short ID is valid for any user. This makes a subscription self-healing:
+// if the node's short_ids ever change (e.g. after a reprovision), a client just
+// refreshes and gets an accepted short ID — no manual config editing on the node.
+func pickShortID(userSID string, current []string) string {
+	if userSID != "" {
+		for _, s := range current {
+			if s == userSID {
+				return userSID // still valid — keep it
+			}
+		}
+	}
+	if len(current) > 0 {
+		return current[0] // stored one is stale/empty — use a current one
+	}
+	return userSID // no snapshot yet — best effort
 }
 
 // label picks a human tag for the link: an explicit Label wins, else email, else

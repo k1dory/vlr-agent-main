@@ -128,21 +128,21 @@ ol{padding-left:1.2em}li{margin:.35em 0}.muted{color:var(--muted);font-size:.9re
 <div class="card">
   <div class="who">Вы вошли как <b>{{.Email}}</b></div>
   {{if .QR}}<div class="qr">{{.QR}}</div>
-  <p class="muted" style="text-align:center;margin-top:-10px">Наведите камеру приложения на QR</p>{{end}}
+  <p class="muted" style="text-align:center;margin-top:-10px">Откройте Happ → сканер QR</p>{{end}}
   <label class="muted">…или ссылка-подписка:</label>
   <span class="url" id="sub">{{.SubURL}}</span>
   <div class="btns">
     <button class="primary" onclick="copySub()">Копировать ссылку</button>
-    <a class="btn ghost" href="hiddify://import/{{.SubURL}}">Открыть в Hiddify</a>
+    <a class="btn ghost" href="happ://add/{{.SubURL}}">Открыть в Happ</a>
   </div>
   <p class="muted" id="copied" style="visibility:hidden">Скопировано ✓</p>
 </div>
 <div class="card">
-  <b>Как подключить</b>
+  <b>Как подключить (рекомендуем Happ)</b>
   <ol>
-    <li>Поставьте <b>Hiddify</b> (Android/iOS/Windows/macOS) или v2rayNG/NekoBox.</li>
-    <li>На телефоне нажмите «Открыть в Hiddify» — подписка импортируется сама.</li>
-    <li>На компьютере — «Копировать ссылку», затем в приложении «Импорт из буфера».</li>
+    <li>Поставьте <b>Happ</b> — Android / iOS / Windows / macOS.</li>
+    <li>Телефон: нажмите «Открыть в Happ», либо в Happ откройте сканер QR и наведите на код выше — подписка добавится сама.</li>
+    <li>Компьютер: «Копировать ссылку», затем в Happ — добавить по ссылке / импорт из буфера.</li>
     <li>Выберите профиль и нажмите подключение.</li>
   </ol>
 </div>
