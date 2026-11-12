@@ -291,6 +291,33 @@ func (s *Store) FindUser(ctx context.Context, ref string) (UserRow, bool, error)
 	return u, err == nil, err
 }
 
+// UsersByEmail returns every user with this exact email across all nodes (a
+// portal user has one key per portal node), joined with each node's entry.
+// ADMIN/portal use only — the email comes from the trusted SSO header.
+func (s *Store) UsersByEmail(ctx context.Context, email string) ([]UserRow, error) {
+	if email == "" {
+		return nil, nil
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT `+userSelectCols+`
+		FROM users u JOIN nodes n ON n.node_id=u.node_id
+		WHERE u.email=$1
+		ORDER BY u.created_at`, email)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []UserRow
+	for rows.Next() {
+		u, err := scanUserRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, u)
+	}
+	return out, rows.Err()
+}
+
 // SubUser resolves a user for the PUBLIC /sub URL by its high-entropy sub_token
 // only (never by a guessable email/telegram id). uuid is also accepted since it
 // is itself a 128-bit secret.

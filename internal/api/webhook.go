@@ -58,19 +58,27 @@ func (s *Server) handleAuthentikEvent(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "revoked": revoked})
 }
 
-// revokeAuthentikUser deletes the portal-provisioned user with this email
-// everywhere. It only touches users the portal created (external_id==portalSource)
+// revokeAuthentikUser deletes every portal-provisioned key with this email (one
+// per portal node). It only touches users the portal created (external_id==portalSource)
 // so a manually/bot-created user with the same email is never collateral. Returns
 // whether anything was removed (idempotent).
 func (s *Server) revokeAuthentikUser(ctx context.Context, email string) bool {
-	u, ok, err := s.pg.FindUser(ctx, email)
-	if err != nil || !ok || u.ExternalID != portalSource {
+	users, err := s.pg.UsersByEmail(ctx, email)
+	if err != nil {
+		s.log.Warn("authentik webhook: lookup failed", "email", email, "err", err)
 		return false
 	}
-	if err := s.deleteUserEverywhere(ctx, u); err != nil {
-		s.log.Warn("authentik webhook: delete failed", "email", email, "err", err)
-		return false
+	revoked := false
+	for _, u := range users {
+		if u.ExternalID != portalSource {
+			continue
+		}
+		if err := s.deleteUserEverywhere(ctx, u); err != nil {
+			s.log.Warn("authentik webhook: delete failed", "email", email, "node", u.NodeID, "err", err)
+			continue
+		}
+		s.log.Info("authentik webhook: revoked user", "email", email, "uuid", u.UUID, "node", u.NodeID)
+		revoked = true
 	}
-	s.log.Info("authentik webhook: revoked user", "email", email, "uuid", u.UUID)
-	return true
+	return revoked
 }

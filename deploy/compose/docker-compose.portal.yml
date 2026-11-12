@@ -7,7 +7,7 @@
 # (postgres + clickhouse + agent + portal. The base `caddy` and `bot` services stay
 # off — they are behind their own profiles.)
 #
-# Needs in .env: PORTAL_DOMAIN, AUTHENTIK_HOST, PUBLIC_SUB_BASE, PORTAL_NODE_ID,
+# Needs in .env: PORTAL_DOMAIN, AUTHENTIK_HOST, PUBLIC_SUB_BASE, PORTAL_NODE_IDS,
 # AUTHENTIK_WEBHOOK_SECRET (see .env.example).
 
 services:
