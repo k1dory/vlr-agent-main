@@ -3,9 +3,12 @@ package api
 import (
 	"html/template"
 	"net/http"
+	"strconv"
 	"strings"
 
+	"github.com/k1dory/vlr-main-agent/internal/config"
 	"github.com/k1dory/vlr-main-agent/internal/qr"
+	"github.com/k1dory/vlr-main-agent/internal/store"
 )
 
 // portalSource marks users the /me portal created, so the Authentik auto-revoke
@@ -17,10 +20,12 @@ const portalSource = "authentik"
 // cfg.PortalHeader (default X-Authentik-Email). The handler:
 //
 //  1. reads the trusted email (a browser cannot set it — the proxy overwrites it),
-//  2. finds that user in PostgreSQL, AUTO-PROVISIONING one on cfg.PortalNodeID on
-//     first visit (create on the node → row + sub_token in PG),
-//  3. renders a personal page with the QR + ready-to-import subscription URL.
+//  2. for EVERY portal node finds that user's key on the node, AUTO-PROVISIONING
+//     one on first visit (create on the node → row + sub_token in PG),
+//  3. renders one card per node (QR + subscription URL), so the user imports
+//     every server and switches between them in the client.
 //
+// A node that fails to provision is shown as unavailable; the others still render.
 // Mounted only when cfg.PortalEnabled().
 func (s *Server) handlePortal(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -33,36 +38,65 @@ func (s *Server) handlePortal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	u, ok, err := s.pg.FindUser(r.Context(), email)
+	existing, err := s.pg.UsersByEmail(r.Context(), email)
 	if err != nil {
 		s.log.Warn("portal lookup failed", "email", email, "err", err)
 		http.Error(w, "lookup failed", http.StatusInternalServerError)
 		return
 	}
-	var subToken string
-	switch {
-	case ok:
-		subToken = u.SubToken
-	default:
-		p, code, perr := s.provision(r.Context(), createReq{
-			NodeID: s.cfg.PortalNodeID, Email: email, ID: portalSource, Profile: s.cfg.PortalProfile,
-		})
-		if perr != nil {
-			s.log.Warn("portal provision failed", "email", email, "code", code, "err", perr)
-			http.Error(w, "provisioning failed", http.StatusBadGateway)
-			return
-		}
-		subToken = p.SubToken
-		s.log.Info("portal auto-provisioned user", "email", email, "uuid", p.UUID, "node", s.cfg.PortalNodeID)
-	}
+	tokenOn := tokensByNode(existing)
 
-	subURL := s.subURL(subToken)
-	renderPortal(w, portalData{
-		Email:  email,
-		Title:  s.cfg.SubTitle,
-		SubURL: subURL,
-		QR:     qrSVG(subURL),
-	}, s)
+	cards := make([]portalCard, 0, len(s.cfg.PortalNodes))
+	for i, n := range s.cfg.PortalNodes {
+		token, ok := tokenOn[n.ID]
+		if !ok {
+			p, code, perr := s.provision(r.Context(), createReq{
+				NodeID: n.ID, Email: email, ID: portalSource, Profile: s.cfg.PortalProfile,
+			})
+			if perr != nil {
+				s.log.Warn("portal provision failed", "email", email, "node", n.ID, "code", code, "err", perr)
+				cards = append(cards, portalCard{Name: cardName(n, i), Failed: true})
+				continue
+			}
+			token = p.SubToken
+			s.log.Info("portal auto-provisioned user", "email", email, "uuid", p.UUID, "node", n.ID)
+		}
+		u := s.subURL(token)
+		cards = append(cards, portalCard{Name: cardName(n, i), SubURL: u, QR: qrSVG(u)})
+	}
+	if allFailed(cards) {
+		http.Error(w, "provisioning failed", http.StatusBadGateway)
+		return
+	}
+	renderPortal(w, portalData{Email: email, Title: s.cfg.SubTitle, Cards: cards}, s)
+}
+
+// tokensByNode maps node -> sub_token of the user's key there (first one wins,
+// rows are ordered oldest first so the original key is kept stable).
+func tokensByNode(users []store.UserRow) map[string]string {
+	m := map[string]string{}
+	for _, u := range users {
+		if _, dup := m[u.NodeID]; !dup && u.SubToken != "" {
+			m[u.NodeID] = u.SubToken
+		}
+	}
+	return m
+}
+
+func cardName(n config.PortalNode, i int) string {
+	if n.Name != "" {
+		return n.Name
+	}
+	return "Сервер " + strconv.Itoa(i+1)
+}
+
+func allFailed(cards []portalCard) bool {
+	for _, c := range cards {
+		if !c.Failed {
+			return false
+		}
+	}
+	return true
 }
 
 // subURL builds the public subscription URL for a token.
@@ -94,10 +128,16 @@ func qrSVG(url string) template.HTML {
 }
 
 type portalData struct {
-	Email  string
-	Title  string
+	Email string
+	Title string
+	Cards []portalCard
+}
+
+type portalCard struct {
+	Name   string
 	SubURL string
 	QR     template.HTML
+	Failed bool
 }
 
 func renderPortal(w http.ResponseWriter, d portalData, s *Server) {
@@ -115,7 +155,7 @@ var portalTmpl = template.Must(template.New("portal").Parse(`<!doctype html>
 :root{--bg:#f6f7f9;--card:#fff;--fg:#1c2430;--muted:#5b6673;--line:#e4e8ee;--accent:#2f6bff;--code-bg:#0f1622;--code-fg:#e6edf3}
 @media(prefers-color-scheme:dark){:root{--bg:#0f1420;--card:#161d2b;--fg:#e7ecf3;--muted:#9aa7b8;--line:#26304260;--accent:#5b8cff;--code-bg:#0b111b}}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
-.wrap{max-width:640px;margin:0 auto;padding:32px 20px 80px}h1{font-size:1.6rem;margin:.2em 0}
+.wrap{max-width:640px;margin:0 auto;padding:32px 20px 80px}h1{font-size:1.6rem;margin:.2em 0}h2{font-size:1.15rem;margin:0 0 10px}
 .lead{color:var(--muted);margin:0 0 24px}.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:22px;margin:16px 0}
 .who{color:var(--muted);font-size:.9rem;margin-bottom:18px}.url{display:block;background:var(--code-bg);color:var(--code-fg);padding:14px;border-radius:8px;font-family:ui-monospace,Menlo,monospace;font-size:.85rem;word-break:break-all;margin:8px 0}
 .btns{display:flex;flex-wrap:wrap;gap:10px;margin-top:14px}button,a.btn{cursor:pointer;border:0;border-radius:10px;padding:12px 18px;font-size:1rem;font-weight:600;text-decoration:none;display:inline-block}
@@ -125,30 +165,35 @@ ol{padding-left:1.2em}li{margin:.35em 0}.muted{color:var(--muted);font-size:.9re
 </style></head><body><div class="wrap">
 <h1>{{if .Title}}{{.Title}}{{else}}Личный VPN{{end}}</h1>
 <p class="lead">Ваша персональная подписка. Импортируется в приложение один раз — серверы обновляются сами.</p>
-<div class="card">
-  <div class="who">Вы вошли как <b>{{.Email}}</b></div>
-  {{if .QR}}<div class="qr">{{.QR}}</div>
+<div class="who">Вы вошли как <b>{{.Email}}</b></div>
+{{if gt (len .Cards) 1}}<p class="muted">У вас {{len .Cards}} подписки — это отдельные серверы. Добавьте в приложение все: если один не работает, переключитесь на другой.</p>{{end}}
+{{range $i, $c := .Cards}}<div class="card">
+  <h2>{{$c.Name}}</h2>
+  {{if $c.Failed}}<p class="muted">Сервер сейчас недоступен — обновите страницу позже.</p>{{else}}
+  {{if $c.QR}}<div class="qr">{{$c.QR}}</div>
   <p class="muted" style="text-align:center;margin-top:-10px">Откройте Happ → сканер QR</p>{{end}}
   <label class="muted">…или ссылка-подписка:</label>
-  <span class="url" id="sub">{{.SubURL}}</span>
+  <span class="url" id="sub{{$i}}">{{$c.SubURL}}</span>
   <div class="btns">
-    <button class="primary" onclick="copySub()">Копировать ссылку</button>
-    <a class="btn ghost" href="happ://add/{{.SubURL}}">Открыть в Happ</a>
+    <button class="primary" onclick="copySub({{$i}})">Копировать ссылку</button>
+    <a class="btn ghost" href="happ://add/{{$c.SubURL}}">Открыть в Happ</a>
   </div>
-  <p class="muted" id="copied" style="visibility:hidden">Скопировано ✓</p>
+  <p class="muted" id="copied{{$i}}" style="visibility:hidden">Скопировано ✓</p>{{end}}
 </div>
-<div class="card">
+{{end}}<div class="card">
   <b>Как подключить (рекомендуем Happ)</b>
   <ol>
     <li>Поставьте <b>Happ</b> — Android / iOS / Windows / macOS.</li>
     <li>Телефон: нажмите «Открыть в Happ», либо в Happ откройте сканер QR и наведите на код выше — подписка добавится сама.</li>
     <li>Компьютер: «Копировать ссылку», затем в Happ — добавить по ссылке / импорт из буфера.</li>
-    <li>Выберите профиль и нажмите подключение.</li>
+    <li>Повторите для каждой подписки на этой странице.</li>
+    <li>Выберите сервер и нажмите подключение. Не работает — переключитесь на другой.</li>
   </ol>
 </div>
-<p class="muted">Ссылка личная — не пересылайте. Утекла? Сообщите админу.</p>
+<p class="muted">На каждом сервере ограничено число одновременно подключённых устройств: лишнее устройство временно не подключится.</p>
+<p class="muted">Ссылки личные — не пересылайте. Утекли? Сообщите админу.</p>
 <script>
-function copySub(){var t=document.getElementById('sub').textContent.trim();
-navigator.clipboard.writeText(t).then(function(){var c=document.getElementById('copied');c.style.visibility='visible';setTimeout(function(){c.style.visibility='hidden'},2000)})}
+function copySub(i){var t=document.getElementById('sub'+i).textContent.trim();
+navigator.clipboard.writeText(t).then(function(){var c=document.getElementById('copied'+i);c.style.visibility='visible';setTimeout(function(){c.style.visibility='hidden'},2000)})}
 </script>
 </div></body></html>`))

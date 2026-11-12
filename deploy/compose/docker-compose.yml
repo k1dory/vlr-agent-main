@@ -75,9 +75,10 @@ services:
       AGENT_SUB_UPDATE_HOURS: ${AGENT_SUB_UPDATE_HOURS:-12}
       AGENT_SUB_SUPPORT_URL: ${AGENT_SUB_SUPPORT_URL:-}
       # Self-service portal (GET /me behind Authentik forward-auth) + auto-revoke
-      # webhook. Portal is on only when PUBLIC_SUB_BASE and PORTAL_NODE_ID are set.
+      # webhook. Portal is on only when PUBLIC_SUB_BASE and PORTAL_NODE_IDS (or legacy PORTAL_NODE_ID) are set.
       PUBLIC_SUB_BASE: ${PUBLIC_SUB_BASE:-}
       PORTAL_NODE_ID: ${PORTAL_NODE_ID:-}
+      PORTAL_NODE_IDS: ${PORTAL_NODE_IDS:-}
       PORTAL_HEADER: ${PORTAL_HEADER:-X-Authentik-Email}
       PORTAL_PROFILE: ${PORTAL_PROFILE:-}
       AUTHENTIK_WEBHOOK_SECRET: ${AUTHENTIK_WEBHOOK_SECRET:-}

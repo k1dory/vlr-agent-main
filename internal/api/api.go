@@ -360,10 +360,7 @@ func (s *Server) handleSub(w http.ResponseWriter, r *http.Request) {
 	body := sub.Stream(u.Entry, []sub.User{su})
 
 	// Presentation headers every mainstream client (v2rayNG/Hiddify/Clash) reads.
-	title := u.Title
-	if title == "" {
-		title = s.cfg.SubTitle
-	}
+	title := subTitle(u.Title, s.cfg.SubTitle, s.cfg.PortalNodeName(u.NodeID))
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	if title != "" {
 		// base64 form is the portable way to carry non-ASCII (Cyrillic/emoji).
@@ -417,4 +414,21 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// subTitle picks the Profile-Title: a per-user title wins; otherwise the default
+// title, suffixed with the portal node's name so a user holding one subscription
+// per server can tell them apart in the client.
+func subTitle(userTitle, defTitle, nodeName string) string {
+	if userTitle != "" {
+		return userTitle
+	}
+	switch {
+	case nodeName == "":
+		return defTitle
+	case defTitle == "":
+		return nodeName
+	default:
+		return defTitle + " · " + nodeName
+	}
 }

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -33,9 +34,11 @@ type Config struct {
 	// SubBaseURL is the public origin that fronts THIS agent's /sub endpoint, e.g.
 	// https://link.infrashark.tech. The portal hands clients <SubBaseURL>/sub/<token>.
 	SubBaseURL string
-	// PortalNodeID is the node the portal auto-provisions its users on (must be a
-	// registered node). Empty => portal disabled.
-	PortalNodeID string
+	// PortalNodes are the nodes the portal auto-provisions each user on — one
+	// subscription per node, so a user can switch servers in the client app.
+	// From PORTAL_NODE_IDS="id=Name,id2=Name2" (Name optional), or the legacy
+	// single PORTAL_NODE_ID. Empty => portal disabled.
+	PortalNodes []PortalNode
 	// PortalHeader is the request header carrying the authenticated email, set by
 	// the Authentik forward-auth proxy. Default "X-Authentik-Email".
 	PortalHeader string
@@ -60,10 +63,48 @@ type Config struct {
 	NodeTLSInsecure bool
 }
 
+// PortalNode is one node the portal provisions on, with the display name users
+// see on the portal card and in the client's profile title.
+type PortalNode struct {
+	ID   string
+	Name string
+}
+
 // PortalEnabled reports whether the self-service /me portal should be mounted: it
 // needs a public sub base to hand out and a node to provision users on.
 func (c Config) PortalEnabled() bool {
-	return c.SubBaseURL != "" && c.PortalNodeID != ""
+	return c.SubBaseURL != "" && len(c.PortalNodes) > 0
+}
+
+// PortalNodeName returns the display name of a portal node ("" if the node is
+// not a portal node or has no name).
+func (c Config) PortalNodeName(id string) string {
+	for _, n := range c.PortalNodes {
+		if n.ID == id {
+			return n.Name
+		}
+	}
+	return ""
+}
+
+// ParsePortalNodes parses "id=Name,id2,id3=Name3" (Name optional), falling back
+// to the legacy single id. Duplicates and blanks are dropped, order is kept.
+func ParsePortalNodes(list, legacy string) []PortalNode {
+	if strings.TrimSpace(list) == "" {
+		list = legacy
+	}
+	var out []PortalNode
+	seen := map[string]bool{}
+	for _, item := range strings.Split(list, ",") {
+		id, name, _ := strings.Cut(strings.TrimSpace(item), "=")
+		id, name = strings.TrimSpace(id), strings.TrimSpace(name)
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, PortalNode{ID: id, Name: name})
+	}
+	return out
 }
 
 // NodeHTTPClient builds the HTTP client the agent uses to reach nodes, honouring
@@ -105,7 +146,7 @@ func FromEnv() (Config, error) {
 		SubSupportURL:      os.Getenv("AGENT_SUB_SUPPORT_URL"),
 
 		SubBaseURL:             os.Getenv("PUBLIC_SUB_BASE"),
-		PortalNodeID:           os.Getenv("PORTAL_NODE_ID"),
+		PortalNodes:            ParsePortalNodes(os.Getenv("PORTAL_NODE_IDS"), os.Getenv("PORTAL_NODE_ID")),
 		PortalHeader:           env("PORTAL_HEADER", "X-Authentik-Email"),
 		PortalProfile:          os.Getenv("PORTAL_PROFILE"),
 		AuthentikWebhookSecret: os.Getenv("AUTHENTIK_WEBHOOK_SECRET"),
