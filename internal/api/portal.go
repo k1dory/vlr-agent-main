@@ -38,37 +38,37 @@ func (s *Server) handlePortal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	existing, err := s.pg.UsersByEmail(r.Context(), email)
+	keys, err := s.ensurePortalKeys(r.Context(), email, s.cfg.PortalProfile)
 	if err != nil {
 		s.log.Warn("portal lookup failed", "email", email, "err", err)
 		http.Error(w, "lookup failed", http.StatusInternalServerError)
 		return
 	}
-	tokenOn := tokensByNode(existing)
-
-	cards := make([]portalCard, 0, len(s.cfg.PortalNodes))
+	// Any of the user's tokens serves every server; prefer the first portal
+	// node's so the URL stays the one the user already imported.
+	token := ""
+	tokenOn := tokensByNode(keys)
+	var servers, missing []string
 	for i, n := range s.cfg.PortalNodes {
-		token, ok := tokenOn[n.ID]
-		if !ok {
-			p, code, perr := s.provision(r.Context(), createReq{
-				NodeID: n.ID, Email: email, ID: portalSource, Profile: s.cfg.PortalProfile,
-			})
-			if perr != nil {
-				s.log.Warn("portal provision failed", "email", email, "node", n.ID, "code", code, "err", perr)
-				cards = append(cards, portalCard{Name: cardName(n, i), Failed: true})
-				continue
+		name := cardName(n, i)
+		if t, ok := tokenOn[n.ID]; ok {
+			servers = append(servers, name)
+			if token == "" {
+				token = t
 			}
-			token = p.SubToken
-			s.log.Info("portal auto-provisioned user", "email", email, "uuid", p.UUID, "node", n.ID)
+		} else {
+			missing = append(missing, name)
 		}
-		u := s.subURL(token)
-		cards = append(cards, portalCard{Name: cardName(n, i), SubURL: u, QR: qrSVG(u)})
 	}
-	if allFailed(cards) {
+	if token == "" {
 		http.Error(w, "provisioning failed", http.StatusBadGateway)
 		return
 	}
-	renderPortal(w, portalData{Email: email, Title: s.cfg.SubTitle, Cards: cards}, s)
+	u := s.subURL(token)
+	renderPortal(w, portalData{
+		Email: email, Title: s.cfg.SubTitle, SubURL: u, QR: qrSVG(u),
+		Servers: servers, Missing: missing,
+	}, s)
 }
 
 // tokensByNode maps node -> sub_token of the user's key there (first one wins,
@@ -88,15 +88,6 @@ func cardName(n config.PortalNode, i int) string {
 		return n.Name
 	}
 	return "Сервер " + strconv.Itoa(i+1)
-}
-
-func allFailed(cards []portalCard) bool {
-	for _, c := range cards {
-		if !c.Failed {
-			return false
-		}
-	}
-	return true
 }
 
 // subURL builds the public subscription URL for a token.
@@ -128,16 +119,12 @@ func qrSVG(url string) template.HTML {
 }
 
 type portalData struct {
-	Email string
-	Title string
-	Cards []portalCard
-}
-
-type portalCard struct {
-	Name   string
-	SubURL string
-	QR     template.HTML
-	Failed bool
+	Email   string
+	Title   string
+	SubURL  string
+	QR      template.HTML
+	Servers []string // servers inside the subscription
+	Missing []string // portal servers the user has no key on yet
 }
 
 func renderPortal(w http.ResponseWriter, d portalData, s *Server) {
@@ -165,35 +152,33 @@ ol{padding-left:1.2em}li{margin:.35em 0}.muted{color:var(--muted);font-size:.9re
 </style></head><body><div class="wrap">
 <h1>{{if .Title}}{{.Title}}{{else}}Личный VPN{{end}}</h1>
 <p class="lead">Ваша персональная подписка. Импортируется в приложение один раз — серверы обновляются сами.</p>
-<div class="who">Вы вошли как <b>{{.Email}}</b></div>
-{{if gt (len .Cards) 1}}<p class="muted">У вас {{len .Cards}} подписки — это отдельные серверы. Добавьте в приложение все: если один не работает, переключитесь на другой.</p>{{end}}
-{{range $i, $c := .Cards}}<div class="card">
-  <h2>{{$c.Name}}</h2>
-  {{if $c.Failed}}<p class="muted">Сервер сейчас недоступен — обновите страницу позже.</p>{{else}}
-  {{if $c.QR}}<div class="qr">{{$c.QR}}</div>
+<div class="card">
+  <div class="who">Вы вошли как <b>{{.Email}}</b></div>
+  {{if gt (len .Servers) 1}}<p class="muted">В подписке {{len .Servers}} сервера: {{range $i, $n := .Servers}}{{if $i}}, {{end}}<b>{{$n}}</b>{{end}}. Не работает один — выберите другой в приложении.</p>{{end}}
+  {{if .Missing}}<p class="muted">Пока недоступны: {{range $i, $n := .Missing}}{{if $i}}, {{end}}{{$n}}{{end}} — появятся в подписке при следующем обновлении.</p>{{end}}
+  {{if .QR}}<div class="qr">{{.QR}}</div>
   <p class="muted" style="text-align:center;margin-top:-10px">Откройте Happ → сканер QR</p>{{end}}
   <label class="muted">…или ссылка-подписка:</label>
-  <span class="url" id="sub{{$i}}">{{$c.SubURL}}</span>
+  <span class="url" id="sub">{{.SubURL}}</span>
   <div class="btns">
-    <button class="primary" onclick="copySub({{$i}})">Копировать ссылку</button>
-    <a class="btn ghost" href="happ://add/{{$c.SubURL}}">Открыть в Happ</a>
+    <button class="primary" onclick="copySub()">Копировать ссылку</button>
+    <a class="btn ghost" href="happ://add/{{.SubURL}}">Открыть в Happ</a>
   </div>
-  <p class="muted" id="copied{{$i}}" style="visibility:hidden">Скопировано ✓</p>{{end}}
+  <p class="muted" id="copied" style="visibility:hidden">Скопировано ✓</p>
 </div>
-{{end}}<div class="card">
+<div class="card">
   <b>Как подключить (рекомендуем Happ)</b>
   <ol>
     <li>Поставьте <b>Happ</b> — Android / iOS / Windows / macOS.</li>
     <li>Телефон: нажмите «Открыть в Happ», либо в Happ откройте сканер QR и наведите на код выше — подписка добавится сама.</li>
     <li>Компьютер: «Копировать ссылку», затем в Happ — добавить по ссылке / импорт из буфера.</li>
-    <li>Повторите для каждой подписки на этой странице.</li>
     <li>Выберите сервер и нажмите подключение. Не работает — переключитесь на другой.</li>
   </ol>
 </div>
 <p class="muted">На каждом сервере ограничено число одновременно подключённых устройств: лишнее устройство временно не подключится.</p>
-<p class="muted">Ссылки личные — не пересылайте. Утекли? Сообщите админу.</p>
+<p class="muted">Ссылка личная — не пересылайте. Утекла? Сообщите админу.</p>
 <script>
-function copySub(i){var t=document.getElementById('sub'+i).textContent.trim();
-navigator.clipboard.writeText(t).then(function(){var c=document.getElementById('copied'+i);c.style.visibility='visible';setTimeout(function(){c.style.visibility='hidden'},2000)})}
+function copySub(){var t=document.getElementById('sub').textContent.trim();
+navigator.clipboard.writeText(t).then(function(){var c=document.getElementById('copied');c.style.visibility='visible';setTimeout(function(){c.style.visibility='hidden'},2000)})}
 </script>
 </div></body></html>`))

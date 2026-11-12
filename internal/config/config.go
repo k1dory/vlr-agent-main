@@ -34,8 +34,8 @@ type Config struct {
 	// SubBaseURL is the public origin that fronts THIS agent's /sub endpoint, e.g.
 	// https://link.infrashark.tech. The portal hands clients <SubBaseURL>/sub/<token>.
 	SubBaseURL string
-	// PortalNodes are the nodes the portal auto-provisions each user on — one
-	// subscription per node, so a user can switch servers in the client app.
+	// PortalNodes are the nodes every portal user gets a key on; all keys ride in
+	// one subscription (named after the node) so the user switches in the client.
 	// From PORTAL_NODE_IDS="id=Name,id2=Name2" (Name optional), or the legacy
 	// single PORTAL_NODE_ID. Empty => portal disabled.
 	PortalNodes []PortalNode

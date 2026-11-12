@@ -3,6 +3,7 @@ package api
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/k1dory/vlr-main-agent/internal/config"
 	"github.com/k1dory/vlr-main-agent/internal/store"
@@ -78,42 +79,49 @@ func TestTokensByNodeKeepsOldestPerNode(t *testing.T) {
 	}
 }
 
-func TestSubTitle(t *testing.T) {
-	cases := [][4]string{
-		{"Мой", "Genomed VPN", "Резервный", "Мой"},
-		{"", "Genomed VPN", "Резервный", "Genomed VPN · Резервный"},
-		{"", "Genomed VPN", "", "Genomed VPN"},
-		{"", "", "Резервный", "Резервный"},
-	}
-	for _, c := range cases {
-		if got := subTitle(c[0], c[1], c[2]); got != c[3] {
-			t.Errorf("subTitle(%q,%q,%q)=%q want %q", c[0], c[1], c[2], got, c[3])
-		}
-	}
-}
-
-func TestPortalRendersOneCardPerNode(t *testing.T) {
+func TestPortalRendersServers(t *testing.T) {
 	var b strings.Builder
-	err := portalTmpl.Execute(&b, portalData{Email: "a@b.ru", Title: "VPN", Cards: []portalCard{
-		{Name: "Основной", SubURL: "https://l/sub/one", QR: qrSVG("https://l/sub/one")},
-		{Name: "Резервный", Failed: true},
-	}})
+	err := portalTmpl.Execute(&b, portalData{Email: "a@b.ru", Title: "VPN", SubURL: "https://l/sub/one",
+		QR: qrSVG("https://l/sub/one"), Servers: []string{"Основной", "Резервный"}, Missing: []string{"Третий"}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	out := b.String()
-	if !strings.Contains(out, `id="sub0"`) || !strings.Contains(out, `id="copied0"`) {
-		t.Error("card 0 ids missing")
-	}
-	for _, want := range []string{"Основной", "Резервный", "https://l/sub/one", "недоступен", "2 подписки"} {
+	for _, want := range []string{"Основной", "Резервный", "https://l/sub/one", "2 сервера", "Пока недоступны", "Третий"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("portal page missing %q", want)
 		}
 	}
 }
 
-func TestAllFailed(t *testing.T) {
-	if !allFailed([]portalCard{{Failed: true}}) || allFailed([]portalCard{{Failed: true}, {}}) {
-		t.Fatal("allFailed wrong")
+func TestSubKeys(t *testing.T) {
+	now := time.Date(2026, 11, 12, 0, 0, 0, 0, time.UTC)
+	past := now.Add(-time.Hour)
+	nodes := []config.PortalNode{{ID: "a"}, {ID: "b"}, {ID: "c"}}
+	req := store.UserRow{UUID: "u-a", NodeID: "a", Enabled: true}
+	all := []store.UserRow{
+		req,
+		{UUID: "u-b-expired", NodeID: "b", Enabled: true, ExpiresAt: &past},
+		{UUID: "u-b", NodeID: "b", Enabled: true},
+		{UUID: "u-b2", NodeID: "b", Enabled: true},
+		{UUID: "u-c-off", NodeID: "c", Enabled: false},
+		{UUID: "u-x", NodeID: "x", Enabled: true}, // not a portal node
+	}
+	got := subKeys(req, all, nodes, now)
+	var ids []string
+	for _, k := range got {
+		ids = append(ids, k.UUID)
+	}
+	if strings.Join(ids, ",") != "u-a,u-b" {
+		t.Fatalf("got %v", ids)
+	}
+	// Requested key on a non-portal node stays first, siblings follow.
+	got = subKeys(store.UserRow{UUID: "u-x", NodeID: "x", Enabled: true}, all, nodes, now)
+	ids = ids[:0]
+	for _, k := range got {
+		ids = append(ids, k.UUID)
+	}
+	if strings.Join(ids, ",") != "u-x,u-a,u-b" {
+		t.Fatalf("non-portal: got %v", ids)
 	}
 }

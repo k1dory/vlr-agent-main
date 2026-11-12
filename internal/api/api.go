@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/k1dory/vlr-main-agent/internal/collector"
@@ -31,6 +32,7 @@ type Server struct {
 	coll  *collector.Collector
 	log   *slog.Logger
 	httpc *http.Client
+	locks sync.Map // email -> *sync.Mutex; serializes portal key provisioning
 }
 
 // New builds the API server.
@@ -353,14 +355,45 @@ func (s *Server) handleSub(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "subscription expired", http.StatusGone) // reaper will delete it shortly
 		return
 	}
-	su := sub.User{
-		UUID: u.UUID, Email: u.Email, TelegramID: u.TelegramID, ExternalID: u.ExternalID,
-		ShortID: u.ShortID, Profile: u.Profile, Label: u.Label, Enabled: u.Enabled,
+	// One subscription carries the user's key on every portal node, so the
+	// client lists all servers and the user switches between them. Portal users
+	// missing a node get a key created here — on their client's next refresh.
+	keys := []store.UserRow{u}
+	if u.Email != "" && len(s.cfg.PortalNodes) > 0 {
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 30*time.Second)
+		var all []store.UserRow
+		if u.ExternalID == portalSource {
+			all, err = s.ensurePortalKeys(ctx, u.Email, u.Profile)
+		} else {
+			all, err = s.pg.UsersByEmail(ctx, u.Email)
+		}
+		cancel()
+		if err != nil {
+			s.log.Warn("sub: sibling keys lookup failed", "email", u.Email, "err", err)
+		} else {
+			keys = subKeys(u, all, s.cfg.PortalNodes, time.Now())
+		}
 	}
-	body := sub.Stream(u.Entry, []sub.User{su})
+	lines := make([]string, 0, len(keys))
+	var used int64
+	for _, k := range keys {
+		label := k.Label
+		if label == "" {
+			label = s.cfg.PortalNodeName(k.NodeID)
+		}
+		lines = append(lines, sub.Link(k.Entry, sub.User{
+			UUID: k.UUID, Email: k.Email, TelegramID: k.TelegramID, ExternalID: k.ExternalID,
+			ShortID: k.ShortID, Profile: k.Profile, Label: label, Enabled: k.Enabled,
+		}))
+		used += k.RxBytes + k.TxBytes
+	}
+	body := base64.StdEncoding.EncodeToString([]byte(strings.Join(lines, "\n")))
 
 	// Presentation headers every mainstream client (v2rayNG/Hiddify/Clash) reads.
-	title := subTitle(u.Title, s.cfg.SubTitle, s.cfg.PortalNodeName(u.NodeID))
+	title := u.Title
+	if title == "" {
+		title = s.cfg.SubTitle
+	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	if title != "" {
 		// base64 form is the portable way to carry non-ASCII (Cyrillic/emoji).
@@ -379,7 +412,7 @@ func (s *Server) handleSub(w http.ResponseWriter, r *http.Request) {
 		expire = u.ExpiresAt.Unix()
 	}
 	w.Header().Set("Subscription-Userinfo",
-		fmt.Sprintf("upload=0; download=%d; total=0; expire=%d", u.RxBytes+u.TxBytes, expire))
+		fmt.Sprintf("upload=0; download=%d; total=0; expire=%d", used, expire))
 
 	_, _ = w.Write([]byte(body))
 }
@@ -416,19 +449,74 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-// subTitle picks the Profile-Title: a per-user title wins; otherwise the default
-// title, suffixed with the portal node's name so a user holding one subscription
-// per server can tell them apart in the client.
-func subTitle(userTitle, defTitle, nodeName string) string {
-	if userTitle != "" {
-		return userTitle
+// subKeys picks the keys one subscription serves: the requested key plus, for
+// every portal node, the user's enabled, unexpired key there — one per node,
+// in portal-node order (the requested key's node first if it is not a portal
+// node). Pure; unit-tested.
+func subKeys(req store.UserRow, all []store.UserRow, nodes []config.PortalNode, now time.Time) []store.UserRow {
+	usable := func(k store.UserRow) bool {
+		return k.Enabled && (k.ExpiresAt == nil || now.Before(*k.ExpiresAt))
 	}
-	switch {
-	case nodeName == "":
-		return defTitle
-	case defTitle == "":
-		return nodeName
-	default:
-		return defTitle + " · " + nodeName
+	isPortal := map[string]bool{}
+	for _, n := range nodes {
+		isPortal[n.ID] = true
 	}
+	var out []store.UserRow
+	if !isPortal[req.NodeID] {
+		out = append(out, req)
+	}
+	for _, n := range nodes {
+		if n.ID == req.NodeID {
+			out = append(out, req)
+			continue
+		}
+		for _, k := range all {
+			if k.NodeID == n.ID && k.UUID != req.UUID && usable(k) {
+				out = append(out, k)
+				break
+			}
+		}
+	}
+	return out
+}
+
+// lockEmail serializes key provisioning per email (portal page + concurrent
+// subscription refreshes must not create duplicate keys on a node).
+func (s *Server) lockEmail(email string) func() {
+	v, _ := s.locks.LoadOrStore(email, &sync.Mutex{})
+	m := v.(*sync.Mutex)
+	m.Lock()
+	return m.Unlock
+}
+
+// ensurePortalKeys gives a portal user a key on every portal node that lacks
+// one and returns all of the user's keys. A node that fails is skipped (logged);
+// the next call retries it.
+func (s *Server) ensurePortalKeys(ctx context.Context, email, profile string) ([]store.UserRow, error) {
+	defer s.lockEmail(email)()
+	keys, err := s.pg.UsersByEmail(ctx, email)
+	if err != nil {
+		return nil, err
+	}
+	have := map[string]bool{}
+	for _, k := range keys {
+		have[k.NodeID] = true
+	}
+	created := false
+	for _, n := range s.cfg.PortalNodes {
+		if have[n.ID] {
+			continue
+		}
+		p, code, perr := s.provision(ctx, createReq{NodeID: n.ID, Email: email, ID: portalSource, Profile: profile})
+		if perr != nil {
+			s.log.Warn("portal key provision failed", "email", email, "node", n.ID, "code", code, "err", perr)
+			continue
+		}
+		s.log.Info("portal key provisioned", "email", email, "uuid", p.UUID, "node", n.ID)
+		created = true
+	}
+	if created {
+		return s.pg.UsersByEmail(ctx, email)
+	}
+	return keys, nil
 }

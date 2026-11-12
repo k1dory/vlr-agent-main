@@ -9,7 +9,7 @@
 ```
 ВЫДАЧА:
   сотрудник (группа vlr-main) → https://link.infrashark.tech → forward_auth (Authentik)
-   → agent /me читает X-Authentik-Email → создаёт юзера на каждом узле из PORTAL_NODE_IDS (через узел) — по подписке на сервер
+   → agent /me читает X-Authentik-Email → создаёт ключ на каждом узле из PORTAL_NODE_IDS (через узел); все ключи — в одной подписке, по ключу на сервер
    → пишет в Postgres → отдаёт страницу: QR + https://link.infrashark.tech/sub/<token>
 
 ОТЗЫВ:
@@ -117,7 +117,7 @@ curl -si -XPOST http://127.0.0.1:8443/v1/authentik/event \
 - **Провайдер не в Embedded Outpost** → forward_auth 403 на всё.
 - **Кросс-домен кука**: обязательно проксировать `/outpost.goauthentik.io/*` на
   Authentik через домен портала (уже сделано в `Caddyfile.portal`).
-- **Узел из `PORTAL_NODE_IDS` не зарегистрирован или лежит** → его карточка показывается как недоступная; 502 — только если не удалось ни на одном.
+- **Узел из `PORTAL_NODE_IDS` не зарегистрирован или лежит** → его ключ просто не попадёт в подписку и создастся при следующем обновлении; 502 — только если не удалось ни на одном.
   Сначала `vlr node connect` (или `POST /v1/nodes`).
 - **Секрет не совпал** → вебхук `401`, юзеры не отзываются. Сверь Header-mapping и
   `AUTHENTIK_WEBHOOK_SECRET`.
