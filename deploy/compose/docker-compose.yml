@@ -61,6 +61,7 @@ services:
     environment:
       AGENT_LISTEN: 0.0.0.0:8443
       AGENT_API_TOKEN: ${AGENT_API_TOKEN:?set AGENT_API_TOKEN in .env}
+      AGENT_LINKS_TOKEN: ${AGENT_LINKS_TOKEN:-}
       POSTGRES_DSN: postgres://${POSTGRES_USER:-vlr}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-vlr}?sslmode=disable
       CLICKHOUSE_ADDR: clickhouse:9000
       CLICKHOUSE_DB: ${CLICKHOUSE_DB:-vlr}

@@ -106,6 +106,7 @@ Point the node's heartbeat at the agent: set the node's `child.main_url` to
 | `POST` | `/v1/nodes` | `AGENT_API_TOKEN` | register/update a node |
 | `GET` | `/v1/users` | `AGENT_API_TOKEN` | list users (`?node_id=` filter) |
 | `POST` | `/v1/users` | `AGENT_API_TOKEN` | create on a node (returns link+sub) |
+| `POST` | `/v1/links` | `AGENT_LINKS_TOKEN` or `AGENT_API_TOKEN` | a person's portal link by email (issues keys on first call); same URL the SSO page `/me` shows |
 | `DELETE` | `/v1/users/<ref>` | `AGENT_API_TOKEN` | delete on the owning node (`ref`=uuid/email/id/tg-id) |
 | `GET` | `/sub/<token>` | — | base64 subscription (`token`=per-user sub_token, or uuid) |
 | `GET` | `/me` | Authentik forward-auth | self-service portal: QR + sub-link, auto-provisions one key per node in `PORTAL_NODE_IDS` (legacy `PORTAL_NODE_ID`) |
@@ -201,3 +202,20 @@ internal/api/         HTTP API (heartbeat, nodes, users, /sub)
 deploy/compose/       docker-compose stack + .env.example
 Dockerfile            multistage, distroless nonroot
 ```
+
+## Issuing links from other systems (ERP)
+
+`POST /v1/links {"email":"i.ivanov@genomed.ru"}` returns the same subscription
+URL the person sees on the SSO page (`/me`): both go through one function
+(`portalLink`), keys are looked up by email case-insensitively and serialized
+per email, so whichever side is first, the person ends up with one link.
+
+```bash
+curl -s -XPOST https://<agent>/v1/links -H "Authorization: Bearer $AGENT_LINKS_TOKEN" \
+     -d '{"email":"i.ivanov@genomed.ru"}'
+# {"email":"…","sub_url":"https://link.infrashark.tech/sub/<token>","servers":["Основной","Резервный"],"missing":[]}
+```
+
+`AGENT_LINKS_TOKEN` can only do this (no node/user management). Keys issued this
+way are marked like portal keys, so the Authentik deactivation webhook revokes
+them too.
