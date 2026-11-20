@@ -301,7 +301,7 @@ func (s *Store) UsersByEmail(ctx context.Context, email string) ([]UserRow, erro
 	rows, err := s.pool.Query(ctx, `
 		SELECT `+userSelectCols+`
 		FROM users u JOIN nodes n ON n.node_id=u.node_id
-		WHERE u.email=$1
+		WHERE lower(u.email)=lower($1)
 		ORDER BY u.created_at`, email)
 	if err != nil {
 		return nil, err

@@ -48,6 +48,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/users", s.guard(s.handleUsers))           // operator
 	mux.HandleFunc("/v1/users/", s.guard(s.handleUserByRef))      // operator (DELETE)
 	mux.HandleFunc("/sub/", s.handleSub)                          // client subscription URL
+	mux.HandleFunc("/v1/links", s.guardLinks(s.handleLinks))      // ERP: a person's portal link by email
 	mux.HandleFunc("/v1/authentik/event", s.handleAuthentikEvent) // Authentik auto-revoke webhook
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
@@ -483,7 +484,7 @@ func subKeys(req store.UserRow, all []store.UserRow, nodes []config.PortalNode, 
 // lockEmail serializes key provisioning per email (portal page + concurrent
 // subscription refreshes must not create duplicate keys on a node).
 func (s *Server) lockEmail(email string) func() {
-	v, _ := s.locks.LoadOrStore(email, &sync.Mutex{})
+	v, _ := s.locks.LoadOrStore(strings.ToLower(email), &sync.Mutex{})
 	m := v.(*sync.Mutex)
 	m.Lock()
 	return m.Unlock
