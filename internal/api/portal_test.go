@@ -87,7 +87,7 @@ func TestPortalRendersServers(t *testing.T) {
 		t.Fatal(err)
 	}
 	out := b.String()
-	for _, want := range []string{"Основной", "Резервный", "https://l/sub/one", "2 сервера", "Пока недоступны", "Третий"} {
+	for _, want := range []string{"Основной", "Резервный", "https://l/sub/one", "Сейчас недоступно: Третий", "<svg"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("portal page missing %q", want)
 		}
@@ -123,5 +123,27 @@ func TestSubKeys(t *testing.T) {
 	}
 	if strings.Join(ids, ",") != "u-x,u-a,u-b" {
 		t.Fatalf("non-portal: got %v", ids)
+	}
+}
+
+func TestPortalPageRendersAllPlatforms(t *testing.T) {
+	var b strings.Builder
+	err := portalTmpl.Execute(&b, portalData{
+		Email: "i.ivanov@genomed.ru", SubURL: "https://link.infrashark.tech/sub/abc",
+		Servers: []string{"Основной", "Резервный"}, Missing: []string{"Новый"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := b.String()
+	for _, want := range []string{
+		"i.ivanov@genomed.ru", "happ://add/https://link.infrashark.tech/sub/abc",
+		"pf pf-ios", "pf pf-android", "pf pf-win", "pf pf-mac",
+		"<b>Основной</b>, <b>Резервный</b>", "Сейчас недоступно: Новый",
+		"Не работает один сервер",
+	} {
+		if !strings.Contains(page, want) {
+			t.Errorf("page lacks %q", want)
+		}
 	}
 }

@@ -18,6 +18,10 @@ import (
 type Config struct {
 	Listen   string // HTTP API listen address, e.g. 0.0.0.0:8443
 	APIToken string // guards management endpoints (POST/DELETE /v1/users, /v1/nodes)
+	// LinksToken is a narrow token for POST /v1/links only (ERP and other
+	// internal systems): it can fetch/issue a person's portal link by email and
+	// nothing else. Empty => only APIToken is accepted there.
+	LinksToken string
 
 	PostgresDSN    string // postgres://user:pass@host:5432/db?sslmode=disable
 	ClickHouseAddr string // host:9000 (native protocol)
@@ -130,6 +134,7 @@ func FromEnv() (Config, error) {
 	c := Config{
 		Listen:             env("AGENT_LISTEN", "0.0.0.0:8443"),
 		APIToken:           os.Getenv("AGENT_API_TOKEN"),
+		LinksToken:         os.Getenv("AGENT_LINKS_TOKEN"),
 		PostgresDSN:        os.Getenv("POSTGRES_DSN"),
 		ClickHouseAddr:     env("CLICKHOUSE_ADDR", "clickhouse:9000"),
 		ClickHouseDB:       env("CLICKHOUSE_DB", "vlr"),

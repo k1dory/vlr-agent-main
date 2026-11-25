@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"html/template"
 	"net/http"
 	"strconv"
@@ -38,37 +39,56 @@ func (s *Server) handlePortal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	keys, err := s.ensurePortalKeys(r.Context(), email, s.cfg.PortalProfile)
+	link, err := s.portalLink(r.Context(), email)
 	if err != nil {
 		s.log.Warn("portal lookup failed", "email", email, "err", err)
 		http.Error(w, "lookup failed", http.StatusInternalServerError)
 		return
 	}
+	if link.SubURL == "" {
+		http.Error(w, "provisioning failed", http.StatusBadGateway)
+		return
+	}
+	renderPortal(w, portalData{
+		Email: email, Title: s.cfg.SubTitle, SubURL: link.SubURL, QR: qrSVG(link.SubURL),
+		Servers: link.Servers, Missing: link.Missing,
+	}, s)
+}
+
+// portalLinkInfo is one person's subscription as the portal shows it.
+type portalLinkInfo struct {
+	SubURL  string   // "" if no portal node could issue a key
+	Servers []string // servers inside the subscription
+	Missing []string // portal servers the person has no key on yet
+}
+
+// portalLink is the ONE place a person's link is decided: the SSO portal page
+// and the ERP endpoint (POST /v1/links) both call it, so the same email always
+// gets the same URL no matter where it was issued first. Keys are found by
+// email (case-insensitive) and created on portal nodes that lack one.
+func (s *Server) portalLink(ctx context.Context, email string) (portalLinkInfo, error) {
+	keys, err := s.ensurePortalKeys(ctx, email, s.cfg.PortalProfile)
+	if err != nil {
+		return portalLinkInfo{}, err
+	}
 	// Any of the user's tokens serves every server; prefer the first portal
 	// node's so the URL stays the one the user already imported.
+	var info portalLinkInfo
 	token := ""
 	tokenOn := tokensByNode(keys)
-	var servers, missing []string
 	for i, n := range s.cfg.PortalNodes {
 		name := cardName(n, i)
 		if t, ok := tokenOn[n.ID]; ok {
-			servers = append(servers, name)
+			info.Servers = append(info.Servers, name)
 			if token == "" {
 				token = t
 			}
 		} else {
-			missing = append(missing, name)
+			info.Missing = append(info.Missing, name)
 		}
 	}
-	if token == "" {
-		http.Error(w, "provisioning failed", http.StatusBadGateway)
-		return
-	}
-	u := s.subURL(token)
-	renderPortal(w, portalData{
-		Email: email, Title: s.cfg.SubTitle, SubURL: u, QR: qrSVG(u),
-		Servers: servers, Missing: missing,
-	}, s)
+	info.SubURL = s.subURL(token)
+	return info, nil
 }
 
 // tokensByNode maps node -> sub_token of the user's key there (first one wins,
@@ -139,46 +159,101 @@ var portalTmpl = template.Must(template.New("portal").Parse(`<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Личный VPN</title>
 <style>
-:root{--bg:#f6f7f9;--card:#fff;--fg:#1c2430;--muted:#5b6673;--line:#e4e8ee;--accent:#2f6bff;--code-bg:#0f1622;--code-fg:#e6edf3}
-@media(prefers-color-scheme:dark){:root{--bg:#0f1420;--card:#161d2b;--fg:#e7ecf3;--muted:#9aa7b8;--line:#26304260;--accent:#5b8cff;--code-bg:#0b111b}}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
-.wrap{max-width:640px;margin:0 auto;padding:32px 20px 80px}h1{font-size:1.6rem;margin:.2em 0}h2{font-size:1.15rem;margin:0 0 10px}
-.lead{color:var(--muted);margin:0 0 24px}.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:22px;margin:16px 0}
-.who{color:var(--muted);font-size:.9rem;margin-bottom:18px}.url{display:block;background:var(--code-bg);color:var(--code-fg);padding:14px;border-radius:8px;font-family:ui-monospace,Menlo,monospace;font-size:.85rem;word-break:break-all;margin:8px 0}
-.btns{display:flex;flex-wrap:wrap;gap:10px;margin-top:14px}button,a.btn{cursor:pointer;border:0;border-radius:10px;padding:12px 18px;font-size:1rem;font-weight:600;text-decoration:none;display:inline-block}
-.primary{background:var(--accent);color:#fff}.ghost{background:transparent;border:1px solid var(--line);color:var(--fg)}
-ol{padding-left:1.2em}li{margin:.35em 0}.muted{color:var(--muted);font-size:.9rem}
-.qr{display:flex;justify-content:center;margin:6px 0 18px}.qr svg{width:220px;height:220px;border:8px solid #fff;border-radius:10px}
+:root{--bg:#f4f6f9;--card:#fff;--fg:#17202c;--muted:#5b6673;--line:#e1e6ed;--accent:#2f6bff;--accent-soft:#e8efff;--code-bg:#f0f3f7;--ok:#178a50;--warn:#a15c00;--warn-bg:#fff6e6}
+@media(max-width:560px){.step{gap:10px}.card{padding:16px}.btns>*{flex:1 1 100%;justify-content:center}}
+@media(prefers-color-scheme:dark){:root{--bg:#0e131d;--card:#161d2a;--fg:#e7ecf3;--muted:#9aa7b8;--line:#263142;--accent:#6b95ff;--accent-soft:#1d2a47;--code-bg:#0f1622;--ok:#3cc47f;--warn:#f0b35a;--warn-bg:#2a2214}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+.wrap{max-width:680px;margin:0 auto;padding:28px 16px 64px}
+h1{font-size:1.55rem;margin:0}h2{font-size:1.1rem;margin:0 0 4px}
+.lead{color:var(--muted);margin:6px 0 20px}.who{font-size:.9rem;color:var(--muted)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:20px;margin:14px 0}
+.step{display:flex;gap:14px}.num{flex:0 0 32px;height:32px;border-radius:50%;background:var(--accent);color:#fff;font-weight:700;display:flex;align-items:center;justify-content:center}
+.step>div:not(.num){flex:1;min-width:0}.hint{color:var(--muted);font-size:.92rem;margin:2px 0 12px}
+.tabs{display:flex;flex-wrap:wrap;gap:6px;margin:4px 0 14px}.tabs label{cursor:pointer;border:1px solid var(--line);border-radius:999px;padding:7px 14px;font-size:.95rem;user-select:none}
+input[name=pf]{position:absolute;opacity:0;pointer-events:none;width:0;height:0}
+#p-ios:checked~* [for=p-ios],#p-android:checked~* [for=p-android],#p-win:checked~* [for=p-win],#p-mac:checked~* [for=p-mac]{background:var(--accent);border-color:var(--accent);color:#fff}
+.pf{display:none}#p-ios:checked~.pf-ios,#p-ios:checked~* .pf-ios,#p-android:checked~.pf-android,#p-android:checked~* .pf-android,#p-win:checked~.pf-win,#p-win:checked~* .pf-win,#p-mac:checked~.pf-mac,#p-mac:checked~* .pf-mac{display:block}
+.btns{display:flex;flex-wrap:wrap;gap:10px}button,a.btn{cursor:pointer;border:0;border-radius:10px;padding:12px 18px;font-size:1rem;font-weight:600;text-decoration:none;display:inline-flex;align-items:center;gap:8px}
+.primary{background:var(--accent);color:#fff}.ghost{background:var(--accent-soft);color:var(--accent)}
+.qr{display:flex;flex-direction:column;align-items:center;gap:6px;margin:4px 0 14px}.qr svg{width:210px;height:210px;max-width:100%;border:8px solid #fff;border-radius:12px;background:#fff}
+.url{display:block;background:var(--code-bg);border:1px solid var(--line);padding:10px 12px;border-radius:8px;font-family:ui-monospace,Menlo,monospace;font-size:.8rem;word-break:break-all;margin:10px 0 0;color:var(--muted)}
+.copied{color:var(--ok);font-size:.9rem;visibility:hidden;margin:6px 0 0}
+ol{padding-left:1.25em;margin:6px 0}li{margin:.3em 0}
+.note{background:var(--warn-bg);color:var(--warn);border-radius:10px;padding:10px 14px;font-size:.92rem;margin:0 0 12px}
+.muted{color:var(--muted);font-size:.9rem}a{color:var(--accent)}details{margin:6px 0}summary{cursor:pointer;font-weight:600}
 </style></head><body><div class="wrap">
 <h1>{{if .Title}}{{.Title}}{{else}}Личный VPN{{end}}</h1>
-<p class="lead">Ваша персональная подписка. Импортируется в приложение один раз — серверы обновляются сами.</p>
-<div class="card">
-  <div class="who">Вы вошли как <b>{{.Email}}</b></div>
-  {{if gt (len .Servers) 1}}<p class="muted">В подписке {{len .Servers}} сервера: {{range $i, $n := .Servers}}{{if $i}}, {{end}}<b>{{$n}}</b>{{end}}. Не работает один — выберите другой в приложении.</p>{{end}}
-  {{if .Missing}}<p class="muted">Пока недоступны: {{range $i, $n := .Missing}}{{if $i}}, {{end}}{{$n}}{{end}} — появятся в подписке при следующем обновлении.</p>{{end}}
-  {{if .QR}}<div class="qr">{{.QR}}</div>
-  <p class="muted" style="text-align:center;margin-top:-10px">Откройте Happ → сканер QR</p>{{end}}
-  <label class="muted">…или ссылка-подписка:</label>
-  <span class="url" id="sub">{{.SubURL}}</span>
-  <div class="btns">
-    <button class="primary" onclick="copySub()">Копировать ссылку</button>
-    <a class="btn ghost" href="happ://add/{{.SubURL}}">Открыть в Happ</a>
-  </div>
-  <p class="muted" id="copied" style="visibility:hidden">Скопировано ✓</p>
+<p class="lead">Три шага — и VPN работает. Настраивается один раз, дальше приложение само получает обновления.</p>
+<p class="who">Вы вошли как <b>{{.Email}}</b></p>
+
+<input type="radio" name="pf" id="p-ios" checked><input type="radio" name="pf" id="p-android"><input type="radio" name="pf" id="p-win"><input type="radio" name="pf" id="p-mac">
+
+<div class="card" style="margin-top:8px">
+  <div class="step"><div class="num">1</div><div>
+    <h2>Выберите устройство и поставьте Happ</h2>
+    <p class="hint">Happ — бесплатное приложение для подключения. Ставится один раз на каждое устройство.</p>
+    <div class="tabs">
+      <label for="p-ios">iPhone / iPad</label><label for="p-android">Android</label><label for="p-win">Windows</label><label for="p-mac">Mac</label>
+    </div>
+  </div></div>
 </div>
+<div class="card pf pf-ios"><div class="btns"><a class="btn primary" href="https://apps.apple.com/ru/app/happ-proxy-utility/id6783623643" target="_blank" rel="noopener">Скачать в App Store</a></div>
+  <p class="muted">Не находится в вашем регионе — <a href="https://apps.apple.com/us/app/happ-proxy-utility/id6504287215" target="_blank" rel="noopener">версия для других стран</a>.</p></div>
+<div class="card pf pf-android"><div class="btns"><a class="btn primary" href="https://play.google.com/store/apps/details?id=com.happproxy" target="_blank" rel="noopener">Google Play</a><a class="btn ghost" href="https://github.com/Happ-proxy/happ-android/releases/latest/download/Happ.apk">Скачать APK</a></div>
+  <p class="muted">Нет Google Play — скачайте APK и разрешите установку из этого источника.</p></div>
+<div class="card pf pf-win"><div class="btns"><a class="btn primary" href="https://github.com/Happ-proxy/happ-desktop/releases/latest/download/setup-Happ.x64.exe">Скачать для Windows</a></div>
+  <p class="muted">Запустите установщик и согласитесь со всеми шагами.</p></div>
+<div class="card pf pf-mac"><div class="btns"><a class="btn primary" href="https://github.com/Happ-proxy/happ-desktop/releases/latest/download/Happ.macOS.universal.dmg">Скачать для Mac</a></div>
+  <p class="muted">Откройте файл .dmg и перетащите Happ в «Программы».</p></div>
+
 <div class="card">
-  <b>Как подключить (рекомендуем Happ)</b>
-  <ol>
-    <li>Поставьте <b>Happ</b> — Android / iOS / Windows / macOS.</li>
-    <li>Телефон: нажмите «Открыть в Happ», либо в Happ откройте сканер QR и наведите на код выше — подписка добавится сама.</li>
-    <li>Компьютер: «Копировать ссылку», затем в Happ — добавить по ссылке / импорт из буфера.</li>
-    <li>Выберите сервер и нажмите подключение. Не работает — переключитесь на другой.</li>
-  </ol>
+  <div class="step"><div class="num">2</div><div>
+    <h2>Добавьте вашу подписку</h2>
+    {{if .Missing}}<p class="note">Сейчас недоступно: {{range $i, $n := .Missing}}{{if $i}}, {{end}}{{$n}}{{end}}. Остальное работает, сервер добавится сам при обновлении подписки.</p>{{end}}
+    <div class="pf pf-ios pf-android">
+      <p class="hint">На этом телефоне: нажмите кнопку — Happ откроется и добавит подписку.</p>
+      <div class="btns"><a class="btn primary" href="happ://add/{{.SubURL}}">Добавить в Happ</a><button class="ghost" onclick="copySub()">Копировать ссылку</button></div>
+      <p class="muted">Не открылось? Нажмите «Копировать ссылку», в Happ — <b>«+»</b> → <b>«Вставить из буфера»</b>.</p>
+    </div>
+    <div class="pf pf-win pf-mac">
+      <p class="hint">Нажмите «Копировать ссылку», откройте Happ, нажмите <b>«+»</b> → <b>«Вставить из буфера»</b>.</p>
+      <div class="btns"><button class="primary" onclick="copySub()">Копировать ссылку</button><a class="btn ghost" href="happ://add/{{.SubURL}}">Открыть в Happ</a></div>
+      {{if .QR}}<details><summary>Подключить телефон по QR-коду</summary><div class="qr" style="margin-top:12px">{{.QR}}<span class="muted">Happ на телефоне → «+» → «Сканировать QR»</span></div></details>{{end}}
+    </div>
+    <p class="copied" id="copied">Ссылка скопирована ✓</p>
+    <span class="url" id="sub">{{.SubURL}}</span>
+  </div></div>
 </div>
-<p class="muted">На каждом сервере ограничено число одновременно подключённых устройств: лишнее устройство временно не подключится.</p>
-<p class="muted">Ссылка личная — не пересылайте. Утекла? Сообщите админу.</p>
+
+<div class="card">
+  <div class="step"><div class="num">3</div><div>
+    <h2>Включите VPN</h2>
+    <ol>
+      <li>В Happ появится подписка{{if .Servers}} с серверами: {{range $i, $n := .Servers}}{{if $i}}, {{end}}<b>{{$n}}</b>{{end}}{{end}}.</li>
+      <li>Выберите сервер и нажмите большую кнопку подключения.</li>
+      <li>Телефон спросит разрешение на VPN — нажмите <b>«Разрешить»</b>.</li>
+    </ol>
+    {{if gt (len .Servers) 1}}<p class="muted">Не работает один сервер — просто выберите другой.</p>{{end}}
+  </div></div>
+</div>
+
+<div class="card">
+  <details><summary>Что-то не получилось</summary><ol>
+    <li><b>Подписка пустая или ошибка</b> — в Happ потяните список вниз или нажмите «Обновить подписку».</li>
+    <li><b>Подключилось, но сайты не открываются</b> — выберите другой сервер.</li>
+    <li><b>Новое устройство не подключается</b> — на каждом сервере ограничено число одновременно подключённых устройств. Отключите VPN на старом.</li>
+    <li><b>Ничего не помогло</b> — напишите администратору и приложите скриншот из Happ.</li>
+  </ol></details>
+</div>
+<p class="muted">Ссылка личная — не пересылайте её. Если она попала к чужим, сообщите администратору: старую отключат и выдадут новую.</p>
 <script>
-function copySub(){var t=document.getElementById('sub').textContent.trim();
-navigator.clipboard.writeText(t).then(function(){var c=document.getElementById('copied');c.style.visibility='visible';setTimeout(function(){c.style.visibility='hidden'},2000)})}
+(function(){var ua=navigator.userAgent,id='p-win';
+if(/iPhone|iPad|iPod/.test(ua)||(/Macintosh/.test(ua)&&navigator.maxTouchPoints>1))id='p-ios';
+else if(/Android/.test(ua))id='p-android';else if(/Macintosh|Mac OS X/.test(ua))id='p-mac';
+var el=document.getElementById(id);if(el)el.checked=true})();
+function copySub(){var t=document.getElementById('sub').textContent.trim(),c=document.getElementById('copied');
+function done(){c.style.visibility='visible';setTimeout(function(){c.style.visibility='hidden'},2500)}
+if(navigator.clipboard){navigator.clipboard.writeText(t).then(done,fallback)}else fallback();
+function fallback(){var a=document.createElement('textarea');a.value=t;document.body.appendChild(a);a.select();try{document.execCommand('copy');done()}catch(e){}document.body.removeChild(a)}}
 </script>
 </div></body></html>`))

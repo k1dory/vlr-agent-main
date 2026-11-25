@@ -64,4 +64,6 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;
 CREATE INDEX IF NOT EXISTS users_node_idx     ON users(node_id);
 CREATE INDEX IF NOT EXISTS users_telegram_idx ON users(telegram_id) WHERE telegram_id <> 0;
 CREATE INDEX IF NOT EXISTS users_email_idx    ON users(email)       WHERE email <> '';
+-- Portal/ERP look people up by email case-insensitively (UsersByEmail).
+CREATE INDEX IF NOT EXISTS users_email_lower_idx ON users(lower(email)) WHERE email <> '';
 CREATE UNIQUE INDEX IF NOT EXISTS users_sub_token_idx ON users(sub_token) WHERE sub_token <> '';
